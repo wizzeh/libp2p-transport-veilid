@@ -4,7 +4,7 @@ use tokio_crate::time::Duration;
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 
-use crate::streams::VeilidStreamManager;
+use crate::stream::VeilidStreamManager;
 
 pub struct StreamHandler;
 

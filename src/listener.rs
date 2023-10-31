@@ -18,8 +18,8 @@ use tokio_crate::sync::{
 
 use veilid_core::{Target, VeilidAPI, VeilidUpdate};
 
-use crate::connections::VeilidConnection;
-use crate::streams::{StreamStatus, VeilidStream, VeilidStreamManager};
+use crate::connection::VeilidConnection;
+use crate::stream::{StreamStatus, VeilidStream, VeilidStreamManager};
 use crate::utils::{
     cryptotyped_to_multiaddr, cryptotyped_to_target, get_my_node_id_from_veilid_state_config,
 };

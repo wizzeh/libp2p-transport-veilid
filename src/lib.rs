@@ -1,11 +1,11 @@
-mod connections;
+mod connection;
 mod errors;
 mod listener;
 mod node_status;
 mod settings;
+mod stream;
 mod stream_handler;
 mod stream_seq;
-mod streams;
 mod utils;
 
 use futures::future::{Future, Ready};
@@ -20,7 +20,7 @@ use libp2p_core::{transport::TransportError, Multiaddr};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use connections::VeilidConnection;
+use connection::VeilidConnection;
 pub use errors::VeilidError;
 use listener::VeilidListener;
 

@@ -17,12 +17,12 @@ use veilid_core::{
 
 use crate::{
     errors::VeilidError,
-    streams::VeilidStream,
+    stream::VeilidStream,
     utils::{
         cryptotyped_to_multiaddr, cryptotyped_to_target, get_my_node_id_from_veilid_state_config,
     },
 };
-use crate::{streams::VeilidStreamManager, utils::get_veilid_state_config};
+use crate::{stream::VeilidStreamManager, utils::get_veilid_state_config};
 // use crate::provider::{IfEvent, Incoming, Provider};
 // use crate::veilid_listener::VeilidListener;
 

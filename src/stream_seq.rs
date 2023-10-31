@@ -1,4 +1,4 @@
-use crate::streams::VeilidStream;
+use crate::stream::VeilidStream;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
