@@ -1,5 +1,7 @@
 # Libp2p-Transport-Veilid
 
+This is ALPHA software. Use at own risk!
+
 Enables libp2p-rust apps to communicate node-to-node over Veilid (view Veilid's [launch slides](https://veilid.com/Launch-Slides-Veilid.pdf) from Defcon 2023).
 
 This transport currently supports ONLY direct routes and not Veilid's private / safety routes.
