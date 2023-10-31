@@ -1,0 +1,118 @@
+program_name = "app"
+namespace = ""
+
+logging.api.enabled=true
+logging.api.level="trace"
+
+capabilities.disable = []
+
+# Data Stores
+block_store.directory = "./.veilid/block" 
+block_store.delete = true 
+
+protected_store.allow_insecure_fallback = true
+protected_store.always_use_insecure_storage = true
+protected_store.directory = "./.veilid/protected"
+protected_store.delete = true
+protected_store.device_encryption_key_password = ""
+protected_store.new_device_encryption_key_password = ""
+
+table_store.directory = "./.veilid/table" 
+table_store.delete = true
+
+# Network
+network.application.http.enabled = false
+network.application.http.listen_address = ""
+network.application.http.path = "app"
+network.application.http.url = ""
+
+network.application.https.enabled = false
+network.application.https.listen_address = ""
+network.application.https.path = "app"
+network.application.https.url = ""
+
+network.client_whitelist_timeout_ms = 300000
+
+network.connection_initial_timeout_ms = 2000
+network.connection_inactivity_timeout_ms = 60000
+
+network.detect_address_changes = true
+
+network.dht.max_find_node_count = 20
+network.dht.resolve_node_timeout_ms = 10000
+network.dht.resolve_node_count = 1
+network.dht.resolve_node_fanout = 4
+network.dht.get_value_timeout_ms = 10000
+network.dht.get_value_count = 3
+network.dht.get_value_fanout = 4
+network.dht.set_value_timeout_ms = 10000
+network.dht.set_value_count = 5
+network.dht.set_value_fanout = 4
+network.dht.min_peer_count = 20
+network.dht.min_peer_refresh_time_ms = 60000
+network.dht.validate_dial_info_receipt_time_ms = 2000
+network.dht.local_subkey_cache_size = 128
+network.dht.local_max_subkey_cache_memory_mb = 256
+network.dht.remote_subkey_cache_size = 1024
+network.dht.remote_max_records = 65536
+network.dht.remote_max_subkey_cache_memory_mb = 64
+network.dht.remote_max_storage_space_mb = 1000
+
+network.hole_punch_receipt_time_ms = 5000
+
+network.max_connections_per_ip4 = 32
+network.max_connections_per_ip6_prefix = 32
+network.max_connections_per_ip6_prefix_size = 56
+network.max_connection_frequency_per_min = 128
+
+network.network_key_password = ""
+
+network.protocol.tcp.connect = true
+network.protocol.tcp.listen = true
+network.protocol.tcp.max_connections = 32
+network.protocol.tcp.listen_address = ""
+network.protocol.tcp.public_address = ""
+
+network.protocol.udp.enabled = true
+network.protocol.udp.socket_pool_size = 0
+network.protocol.udp.listen_address = ""
+network.protocol.udp.public_address = ""
+
+network.protocol.ws.connect = false
+network.protocol.ws.listen = false
+network.protocol.ws.listen_address = ""
+network.protocol.ws.max_connections = 16
+network.protocol.ws.path = "ws"
+network.protocol.ws.url = ""
+
+network.protocol.wss.connect = false
+network.protocol.wss.listen = false
+network.protocol.wss.max_connections = 16
+network.protocol.wss.listen_address = ""
+network.protocol.wss.path = "ws"
+network.protocol.wss.url = ""
+
+network.restricted_nat_retries = 3
+
+network.reverse_connection_receipt_time_ms = 5000
+
+network.routing_table.bootstrap = ["bootstrap.veilid.net", "ws://bootstrap.veilid.net:5150/ws"]
+network.routing_table.limit_over_attached = 64
+network.routing_table.limit_fully_attached = 32
+network.routing_table.limit_attached_strong = 16
+network.routing_table.limit_attached_good = 8
+network.routing_table.limit_attached_weak = 4
+
+network.rpc.concurrency = 0
+network.rpc.default_route_hop_count = 1
+network.rpc.max_timestamp_behind_ms = 10000
+network.rpc.max_timestamp_ahead_ms = 10000
+network.rpc.max_route_hop_count = 4
+network.rpc.queue_size = 1024
+network.rpc.timeout_ms = 5000
+
+network.tls.certificate_path = "./.veilid/cert"
+network.tls.connection_initial_timeout_ms = 2000
+network.tls.private_key_path = "./.veilid/key"
+
+network.upnp = false
