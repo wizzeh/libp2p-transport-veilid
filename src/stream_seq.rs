@@ -22,14 +22,14 @@ impl StreamSeq {
 
     pub fn load(&self) -> u32 {
         let seq = self.value.load(std::sync::atomic::Ordering::SeqCst);
-        debug!("StreamSeq | load | seq {:?}", seq);
+        trace!("StreamSeq | load | seq {:?}", seq);
         seq
     }
 
     pub fn increment(&self) -> u32 {
         let next_seq_num = self.value.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
-        debug!("StreamSeq | increment | new seq {:?}", next_seq_num);
+        trace!("StreamSeq | increment | new seq {:?}", next_seq_num);
 
         next_seq_num
     }

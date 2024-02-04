@@ -4,21 +4,31 @@ mod listener;
 mod node_status;
 mod settings;
 mod stream;
-mod stream_handler;
 mod stream_seq;
 mod utils;
 
 use futures::future::{Future, Ready};
 use futures::FutureExt;
 
+use futures::stream::StreamExt;
+use libp2p::Multiaddr;
+use node_status::NodeStatus;
 use tokio_crate::runtime::Handle;
 use tokio_crate::sync::mpsc::{channel, Receiver, Sender};
 
-use libp2p_core::Transport;
-use libp2p_core::{transport::TransportError, Multiaddr};
+use libp2p::{
+    core::{
+        transport::{ListenerId, TransportError, TransportEvent},
+        Transport,
+    },
+    identity::Keypair,
+};
 
+use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::task::Poll;
+use std::time::Duration;
 
 use connection::VeilidConnection;
 pub use errors::VeilidError;
@@ -27,15 +37,16 @@ use listener::VeilidListener;
 use veilid_core::UpdateCallback;
 use veilid_core::{ConfigCallback, VeilidUpdate};
 pub use veilid_core::{VeilidAPI, VeilidConfig};
+use wasm_timer::{Instant, Interval};
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 
 use crate::settings::lookup_config;
-use crate::stream_handler::StreamHandler;
+use crate::stream::VeilidStream;
 use crate::utils::{
-    cryptotyped_to_target, get_my_node_id_from_veilid_state_config, get_veilid_state_config,
-    multiaddr_to_target, validate_multiaddr_for_veilid,
+    cryptotyped_to_multiaddr, cryptotyped_to_target, get_my_node_id_from_veilid_state_config,
+    get_veilid_state_config, multiaddr_to_target, validate_multiaddr_for_veilid,
 };
 
 struct Settings {
@@ -56,74 +67,104 @@ const SETTINGS: Settings = Settings {
     // Send a status message, if the node hasn't sent another message
     connection_keepalive_timeout: 5,
     // delete the stream if no message received by timeout
-    stream_timeout_secs: 15,
+    stream_timeout_secs: 30,
 };
 
-pub struct VeilidTransport<T> {
-    _impl: std::marker::PhantomData<T>,
+pub struct VeilidTransport<VeilidConnection> {
     update_callback: Option<UpdateCallback>, // a callback passed at api_startup to receive veilid events
     config_callback: Option<ConfigCallback>, // a callback passed at api_startup to feed config values to veilid_core
     update_receiver: Option<Receiver<VeilidUpdate>>, // a stream of VeilidUpdate events from UpdateCallback
     api: Option<Arc<VeilidAPI>>, // This provides access to the main functionality of Veilid.
     runtime: Option<tokio_crate::runtime::Handle>, // handle to current runtime for thread spawning
+    listener: Option<VeilidListener>,
+    events: VecDeque<
+        TransportEvent<
+            <VeilidTransport<VeilidConnection> as libp2p::core::Transport>::ListenerUpgrade,
+            <VeilidTransport<VeilidConnection> as libp2p::core::Transport>::Error,
+        >,
+    >,
+    status: Arc<RwLock<NodeStatus>>,
+    heartbeat: Interval,
 }
 
 impl VeilidTransport<VeilidConnection> {
-    pub fn new(handle: Option<Handle>) -> Self {
+    pub fn new(handle: Option<Handle>, node_keys: Keypair) -> Self {
         fn create_update_callback(tx: Sender<VeilidUpdate>) -> UpdateCallback {
-            let tx = tx.clone();
             Arc::new(move |update: VeilidUpdate| {
                 trace!("update_callback | {:?}", update);
 
                 let tx_clone = tx.clone();
-                let update_clone = update.clone(); // clone it here
+                let update_clone = update.clone();
 
                 tokio_crate::spawn(async move {
-                    tx_clone
-                        .send(update_clone)
-                        .await
-                        .expect("Channel send failed");
+                    if let Err(error) = tx_clone.send(update_clone).await {
+                        error!("update_callback | {:?}", error);
+                    }
                 });
             })
         }
 
         // Create the config callback to read from Settings
         let config_callback: ConfigCallback =
-            Arc::new(move |config_key: String| lookup_config(&config_key));
+            Arc::new(move |config_key: String| lookup_config(&config_key, node_keys.clone()));
 
         // Create the UpdateCallback
         let (tx, rx) = channel::<VeilidUpdate>(32);
         let update_callback = create_update_callback(tx);
+
+        let heartbeat_duration = Duration::from_secs(5).clone();
 
         Self {
             update_callback: Some(update_callback),
             config_callback: Some(config_callback),
             api: None,
             update_receiver: Some(rx),
-            _impl: std::marker::PhantomData,
             runtime: handle,
+            listener: None,
+            events: VecDeque::new(),
+            status: Arc::new(RwLock::new(NodeStatus::new())),
+            heartbeat: Interval::new_at(
+                Instant::now() + heartbeat_duration.clone(),
+                heartbeat_duration.clone(),
+            ),
         }
     }
 }
 
-impl Default for VeilidTransport<VeilidConnection> {
-    fn default() -> Self {
-        Self::new(None)
+impl<T> VeilidTransport<T> {
+    pub fn pop_event(
+        mut self: Pin<&mut Self>,
+    ) -> Option<
+        TransportEvent<
+            <VeilidTransport<T> as libp2p::core::Transport>::ListenerUpgrade,
+            <VeilidTransport<T> as libp2p::core::Transport>::Error,
+        >,
+    > {
+        let this = self.as_mut().get_mut();
+        this.events.pop_front()
     }
 }
+
+// impl Default for VeilidTransport<VeilidConnection> {
+//     fn default() -> Self {
+//         let node_keys = Keypair::generate_ed25519();
+
+//         Self::new(None, node_keys)
+//     }
+// }
 
 impl<T> Transport for VeilidTransport<T> {
     type Output = VeilidConnection;
     type Error = VeilidError;
     type Dial = Pin<Box<dyn Future<Output = Result<Self::Output, Self::Error>> + Send>>;
-    type Listener = VeilidListener;
     type ListenerUpgrade = Ready<Result<Self::Output, Self::Error>>;
 
     fn listen_on(
         self: &mut VeilidTransport<T>,
-        _addr: Multiaddr,
-    ) -> Result<Self::Listener, TransportError<Self::Error>> {
-        debug!("VeilidTransport::listen_on");
+        id: ListenerId,
+        addr: Multiaddr,
+    ) -> Result<(), TransportError<Self::Error>> {
+        info!("VeilidTransport::listen_on id: {:?} addr: {:?}", id, addr);
 
         let update_cb = self
             .update_callback
@@ -144,10 +185,6 @@ impl<T> Transport for VeilidTransport<T> {
             let handle = self.runtime.as_ref().unwrap().clone();
 
             handle.spawn(async move {
-                StreamHandler::run().await;
-            });
-
-            handle.spawn(async move {
                 let result = veilid_core::api_startup(update_cb, config_cb).await;
 
                 if let Ok(api_ref) = &result {
@@ -165,6 +202,7 @@ impl<T> Transport for VeilidTransport<T> {
             match api_result {
                 Ok(api) => {
                     debug!("VeilidTransport::api_result API {:?}", api);
+
                     self.api = Some(Arc::new(api));
                 }
                 Err(e) => {
@@ -176,9 +214,27 @@ impl<T> Transport for VeilidTransport<T> {
             }
         }
 
-        if let Some(update_receiver) = self.update_receiver.take() {
-            let listener = VeilidListener::new(update_receiver, self.api.clone());
-            Ok(listener)
+        let api = self.api.clone();
+        let veilid_state_config: veilid_core::VeilidStateConfig =
+            get_veilid_state_config(api).unwrap();
+
+        if let Some(node_id) = get_my_node_id_from_veilid_state_config(veilid_state_config) {
+            let addr = cryptotyped_to_multiaddr(&node_id);
+
+            info!(
+                "VeilidTransport: VeilidTransport::listen_on address {}",
+                addr.to_string()
+            );
+
+            if let Some(update_receiver) = self.update_receiver.take() {
+                let listener =
+                    VeilidListener::new(id, update_receiver, self.api.clone(), self.status.clone());
+                self.listener = Some(listener);
+
+                Ok(())
+            } else {
+                Err(TransportError::Other(VeilidError::CouldNotCreateListener))
+            }
         } else {
             Err(TransportError::Other(VeilidError::CouldNotCreateListener))
         }
@@ -206,22 +262,40 @@ impl<T> Transport for VeilidTransport<T> {
 
         let api_clone = api.clone();
 
-        let veilid_state_config = get_veilid_state_config(Some(api_clone)).unwrap();
+        let veilid_state_config: veilid_core::VeilidStateConfig =
+            get_veilid_state_config(Some(api_clone)).unwrap();
         let node_id = get_my_node_id_from_veilid_state_config(veilid_state_config).unwrap();
 
         let local_target = cryptotyped_to_target(&node_id);
 
-        match multiaddr_to_target(&addr) {
-            Ok(remote_target) => {
-                return Ok(async move {
-                    let connection = VeilidConnection::new(api, local_target, remote_target)?;
+        if let Some(listener) = &self.listener {
+            let streams = listener.streams.clone();
 
-                    connection.connect().await;
-                    return Ok(connection);
+            match multiaddr_to_target(&addr) {
+                Ok(remote_target) => {
+                    return Ok(async move {
+                        let stream =
+                            Arc::new(VeilidStream::new(api.clone(), remote_target.clone()));
+
+                        streams
+                            .lock()
+                            .unwrap()
+                            .insert(remote_target, stream.clone());
+
+                        let mut connection =
+                            VeilidConnection::new(api, local_target, remote_target, stream)?;
+
+                        connection.connect();
+                        return Ok(connection);
+                    }
+                    .boxed());
                 }
-                .boxed());
+                Err(_) => return Err(TransportError::MultiaddrNotSupported(addr)),
             }
-            Err(_) => return Err(TransportError::MultiaddrNotSupported(addr)),
+        } else {
+            return Err(TransportError::Other(VeilidError::Generic(
+                "No listener on transport".to_string(),
+            )));
         }
     }
 
@@ -240,5 +314,62 @@ impl<T> Transport for VeilidTransport<T> {
             listen, observed
         );
         None
+    }
+
+    fn remove_listener(&mut self, id: ListenerId) -> bool {
+        info!("VeilidTransport: remove_listener {:?}", id);
+        true
+    }
+
+    fn poll(
+        mut self: Pin<&mut VeilidTransport<T>>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<libp2p::core::transport::TransportEvent<Self::ListenerUpgrade, Self::Error>>
+    {
+        if let Some(event) = self.as_mut().pop_event() {
+            info!("VeilidTransport: poll {:?}", event);
+
+            return Poll::Ready(event);
+        }
+
+        if let Some(listener) = &mut self.listener {
+            match listener.poll_next_unpin(cx) {
+                Poll::Ready(Some(event)) => {
+                    info!("VeilidTransport | poll | listener {:?}", event);
+                    return Poll::Ready(event);
+                }
+                Poll::Ready(None) => {
+                    // The listener stream has ended; handle this as needed
+                }
+                Poll::Pending => {
+                    // The listener has no events available at the moment
+                }
+            }
+        }
+
+        // Trigger background maintenance process
+        while let Poll::Ready(Some(())) = self.heartbeat.poll_next_unpin(cx) {
+            heartbeat(&mut self);
+        }
+
+        Poll::Pending
+    }
+}
+
+fn heartbeat<T>(transport: &mut Pin<&mut VeilidTransport<T>>) {
+    info!("VeilidTransport | heartbeat");
+
+    if let Some(listener) = &transport.listener {
+        let map = listener.streams.lock().unwrap();
+        let streams = map.values().cloned();
+        for stream in streams {
+            stream
+                // send our status if we haven't sent anything recently
+                .send_status_if_stale()
+                // generate messages for whatever is in the buffer to clear it
+                .generate_messages(0)
+                // try send any undelivered messages
+                .send_app_msg();
+        }
     }
 }

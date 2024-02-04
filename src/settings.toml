@@ -7,17 +7,14 @@ logging.api.level="trace"
 capabilities.disable = []
 
 # Data Stores
-block_store.directory = "./.veilid/block" 
 block_store.delete = true 
 
 protected_store.allow_insecure_fallback = true
 protected_store.always_use_insecure_storage = true
-protected_store.directory = "./.veilid/protected"
 protected_store.delete = true
 protected_store.device_encryption_key_password = ""
 protected_store.new_device_encryption_key_password = ""
 
-table_store.directory = "./.veilid/table" 
 table_store.delete = true
 
 # Network
@@ -32,6 +29,7 @@ network.application.https.path = "app"
 network.application.https.url = ""
 
 network.client_whitelist_timeout_ms = 300000
+network.client_allowlist_timeout_ms = 300000
 
 network.connection_initial_timeout_ms = 2000
 network.connection_inactivity_timeout_ms = 60000
@@ -48,11 +46,14 @@ network.dht.get_value_fanout = 4
 network.dht.set_value_timeout_ms = 10000
 network.dht.set_value_count = 5
 network.dht.set_value_fanout = 4
+network.dht.member_watch_limit = 8
 network.dht.min_peer_count = 20
 network.dht.min_peer_refresh_time_ms = 60000
+network.dht.max_watch_expiration_ms = 600000
 network.dht.validate_dial_info_receipt_time_ms = 2000
 network.dht.local_subkey_cache_size = 128
 network.dht.local_max_subkey_cache_memory_mb = 256
+network.dht.public_watch_limit = 32
 network.dht.remote_subkey_cache_size = 1024
 network.dht.remote_max_records = 65536
 network.dht.remote_max_subkey_cache_memory_mb = 64

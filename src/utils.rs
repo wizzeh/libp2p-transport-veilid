@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use libp2p_core::Multiaddr;
+use libp2p::core::Multiaddr;
 
 use veilid_core::{CryptoKey, Encodable, FourCC, FromStr, Target, TypedKey, VeilidAPIError};
 use veilid_core::{CryptoTyped, VeilidStateConfig};
@@ -17,9 +17,17 @@ pub fn multiaddr_to_target(m: &Multiaddr) -> Result<Target, &'static str> {
     // Parse the input string and split it into kind and value
     let s = m.to_string();
 
+    trace!("multiaddr_to_target | s {:?}", s);
+
     if let Some(index) = s.find(":") {
         let kind_str = &s[6..index]; // "/unix/" takes 6 characters, so start from index 6
         let value_str = &s[index + 1..];
+
+        trace!(
+            "multiaddr_to_target | kind_str {:?} value_str {:?}",
+            kind_str,
+            value_str
+        );
 
         // Create a CryptoTyped object
         let typed_key: TypedKey = CryptoTyped {
@@ -27,7 +35,7 @@ pub fn multiaddr_to_target(m: &Multiaddr) -> Result<Target, &'static str> {
             value: CryptoKey::try_from(value_str).unwrap(),
         };
 
-        trace!("create_target_from_str | typed_key {:?}", typed_key);
+        trace!("multiaddr_to_target | typed_key {:?}", typed_key);
 
         // Create a Target::NodeId object
         Ok(Target::NodeId(typed_key))
@@ -47,7 +55,7 @@ pub fn cryptotyped_to_multiaddr(c: &CryptoTyped<CryptoKey>) -> Multiaddr {
 
     let value = c.value.encode();
 
-    let str = format!("/unix/{:?}:{:?}", kind, value);
+    let str = format!("/unix/{:?}:{}", kind, value);
 
     let addr: Multiaddr = str.parse().unwrap();
     trace!("cryptotyped_to_multiaddr: {:?}", addr);

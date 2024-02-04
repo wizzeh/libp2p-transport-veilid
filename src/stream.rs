@@ -1,4 +1,4 @@
-use lazy_static::lazy_static;
+// use prost::Message;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -18,6 +18,7 @@ use crate::SETTINGS;
 // the local and remote nodes. Processes fetch a stream by its remote target
 // using VeilidStreamManager
 
+#[derive(Debug)]
 pub enum StreamStatus {
     Active,
     Expired,
@@ -62,11 +63,13 @@ pub struct VeilidStream {
     pub outbound_delivered_seq: Arc<StreamSeq>,
     // last outbound message sent timestamp
     outbound_last_timestamp: Arc<Mutex<Instant>>,
+    // so the connection can close
+    pub status: Arc<Mutex<StreamStatus>>,
 }
 
 impl VeilidStream {
-    pub fn new(api: Arc<VeilidAPI>, remote_target: Target) {
-        let stream = Self {
+    pub fn new(api: Arc<VeilidAPI>, remote_target: Target) -> Self {
+        Self {
             api,
             remote_target,
 
@@ -83,8 +86,9 @@ impl VeilidStream {
             outbound_last_timestamp: Arc::new(Mutex::new(Instant::now())),
 
             waker: Arc::new(Mutex::new(None)),
-        };
-        VeilidStreamManager::insert_stream(stream.into());
+            status: Arc::new(Mutex::new(StreamStatus::Active)),
+        }
+        // VeilidStreamManager::insert_stream(stream.into());
     }
 
     pub fn update_inbound_last_timestamp_to_now(self: Arc<VeilidStream>) -> Arc<Self> {
@@ -103,7 +107,16 @@ impl VeilidStream {
         self.clone()
     }
 
-    pub async fn is_active(&self) -> bool {
+    pub fn update_status(self: Arc<VeilidStream>, status: StreamStatus) -> Arc<Self> {
+        debug!("VeilidStream | update_status");
+
+        let mut stream_status = self.status.lock().unwrap();
+
+        *stream_status = status;
+        self.clone()
+    }
+
+    pub fn is_active(&self) -> bool {
         debug!("VeilidStream | is_active");
         // the stream is active if we've received a message within the timeout deadline
         let seconds = SETTINGS.stream_timeout_secs;
@@ -127,7 +140,7 @@ impl VeilidStream {
 
     // Inbound
     pub fn decode_message(packet: &[u8]) -> Result<(u32, u32, Vec<u8>), &'static str> {
-        trace!("VeilidStream | decode_message");
+        debug!("VeilidStream | decode_message");
 
         if packet.len() < 4 {
             return Err("Packet too short to contain a u32 sequence number");
@@ -139,7 +152,7 @@ impl VeilidStream {
 
         let data = packet[8..].to_vec();
 
-        trace!(
+        debug!(
             "VeilidStream | decode_message | they have {:?} | {:?} bytes {:?}",
             delivered_seq,
             seq,
@@ -149,24 +162,31 @@ impl VeilidStream {
         Ok((delivered_seq, seq, data))
     }
 
-    pub async fn recv_message(
+    pub fn recv_message(
         self: Arc<VeilidStream>,
         delivered_seq: u32,
         seq: u32,
         data: Vec<u8>,
     ) -> StreamStatus {
-        if !self.is_active().await {
-            return StreamStatus::Expired;
-        }
+        // if !self.is_active() {
+        //     debug!("VeilidStream | recv_message | expired");
+        //     return StreamStatus::Expired;
+        // }
 
-        trace!(
-            "VeilidStream | recv_message | seq {:?} bytes {:?}",
+        debug!(
+            "VeilidStream | recv_message | delivered_seq: {:?} seq {:?} bytes {:?}",
+            delivered_seq,
             seq,
             data.len()
         );
 
         // check if we need this payload
         let inbound_received_seq = self.get_inbound_received_seq();
+        debug!(
+            "VeilidStream | recv_message | inbound_received_seq {:?}",
+            inbound_received_seq
+        );
+
         let mut final_seq = inbound_received_seq;
 
         if seq <= inbound_received_seq {
@@ -198,7 +218,7 @@ impl VeilidStream {
                 data.len()
             );
 
-            trace!(
+            debug!(
                 "VeilidStream | recv_message | received {:?}",
                 String::from_utf8_lossy(&data)
             );
@@ -238,7 +258,7 @@ impl VeilidStream {
     }
 
     pub fn recv_inbound_buffer(&self, data: &[u8]) {
-        trace!("VeilidStream | recv_inbound_buffer | start");
+        debug!("VeilidStream | recv_inbound_buffer | start");
 
         // Obtain a lock on the read_buffer.
         let mut read_buffer = self.inbound_buffer.lock().unwrap();
@@ -248,7 +268,7 @@ impl VeilidStream {
 
         drop(read_buffer);
 
-        trace!(
+        debug!(
             "VeilidStream | recv_inbound_buffer | data {:?}",
             String::from_utf8_lossy(data)
         );
@@ -286,12 +306,12 @@ impl VeilidStream {
 
             let slice_len = u32::from_le_bytes(slice_len_bytes) as usize;
 
-            trace!(
+            debug!(
                 "VeilidStream | update_inbound_stream | inbound_buffer {:?}",
                 String::from_utf8_lossy(&inbound_buffer_guard.clone())
             );
 
-            trace!(
+            debug!(
                 "VeilidStream | update_inbound_stream | slice_len {:?}",
                 slice_len
             );
@@ -304,7 +324,7 @@ impl VeilidStream {
                 // remove our u32
                 slice.drain(..4);
 
-                trace!(
+                debug!(
                     "VeilidStream | update_inbound_stream | slice {:?}",
                     String::from_utf8_lossy(&slice.clone())
                 );
@@ -334,7 +354,7 @@ impl VeilidStream {
                 inbound_stream_guard.extend(slice);
             }
 
-            trace!(
+            debug!(
                 "VeilidStream | update_inbound_stream | stream {:?}",
                 String::from_utf8_lossy(&inbound_stream_guard)
             );
@@ -350,12 +370,12 @@ impl VeilidStream {
 
     pub fn read_inbound_stream(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Option<usize> {
         let mut stream = self.inbound_stream.lock().unwrap();
-        trace!(
+        debug!(
             "VeilidStream | read_inbound_stream | stream {:?}",
             String::from_utf8_lossy(&stream)
         );
         if stream.is_empty() {
-            trace!("VeilidStream | read_inbound_stream | empty");
+            debug!("VeilidStream | read_inbound_stream | empty");
             *self.waker.lock().unwrap() = Some(cx.waker().clone());
             None
         } else {
@@ -368,7 +388,7 @@ impl VeilidStream {
 
             let data: Vec<u8> = stream.drain(..readable).collect();
 
-            trace!(
+            debug!(
                 "VeilidStream | read_inbound_stream | {:?}",
                 String::from_utf8_lossy(&data)
             );
@@ -378,7 +398,7 @@ impl VeilidStream {
     }
 
     pub fn remove_sent_messages_from_queue(self: &Arc<VeilidStream>) -> Arc<Self> {
-        trace!("VeilidStream | remove_sent_messages_from_queue");
+        debug!("VeilidStream | remove_sent_messages_from_queue");
 
         let delivered_seq = self.get_outbound_delivered_seq();
 
@@ -427,7 +447,7 @@ impl VeilidStream {
             data.len()
         );
 
-        trace!(
+        debug!(
             "VeilidStream | insert_outbound_stream | bytes {:?} | {:?}",
             data.len(),
             String::from_utf8_lossy(data)
@@ -437,9 +457,9 @@ impl VeilidStream {
         let veilid_stream_clone = Arc::clone(self);
         task::spawn(async move {
             veilid_stream_clone
-                .generate_messages(SETTINGS.transport_stream_packet_data_size_bytes)
-                .send_app_msg()
-                .await;
+                // .generate_messages(SETTINGS.transport_stream_packet_data_size_bytes)
+                .generate_messages(0)
+                .send_app_msg();
         });
     }
 
@@ -475,7 +495,7 @@ impl VeilidStream {
     }
 
     pub fn encode_message(received_seq: u32, msg_seq: u32, msg_data: Arc<[u8]>) -> Vec<u8> {
-        trace!("VeilidStream | encode_message");
+        debug!("VeilidStream | encode_message");
 
         let mut packet = Vec::new();
 
@@ -488,7 +508,7 @@ impl VeilidStream {
         // add the msg data slice
         packet.extend_from_slice(&msg_data);
 
-        trace!(
+        debug!(
             "VeilidStream | encode_message | {:?} ",
             String::from_utf8_lossy(&packet)
         );
@@ -498,8 +518,8 @@ impl VeilidStream {
         packet
     }
 
-    pub async fn send_app_msg(self: &Arc<VeilidStream>) -> Arc<Self> {
-        trace!("VeilidStream | get_outbound_delivered_seq");
+    pub fn send_app_msg(self: &Arc<VeilidStream>) -> Arc<Self> {
+        debug!("VeilidStream | send_app_msg");
 
         let resend_interval = Duration::from_secs(SETTINGS.message_retry_timeout);
         let now = Instant::now();
@@ -519,6 +539,7 @@ impl VeilidStream {
                 })
                 .cloned()
                 .collect();
+
             // Update the last_sent timestamp for messages being sent
             for message in &messages_to_send {
                 if let Some(outbound_message) = guard.get_mut(&message.seq) {
@@ -533,40 +554,58 @@ impl VeilidStream {
             }
 
             // Send logic
-            let routing_context = self.api.routing_context();
 
-            // let routing_context = self.api.routing_context();
-            // let routing_context = self
-            //     .api
-            //     .routing_context()
-            //     .with_sequencing(Sequencing::EnsureOrdered);
+            if let Ok(routing_context) = self.api.routing_context() {
+                let target = self.remote_target.clone();
+                debug!("VeilidStream | send_app_msg | target {:?}", target);
 
-            let target = self.remote_target.clone();
+                let received_seq = self.get_inbound_received_seq();
 
-            let received_seq = self.get_inbound_received_seq();
-            let message_data =
-                VeilidStream::encode_message(received_seq, message.seq, message.data.into());
+                // let message_data: Vec<u8> = Vec::new();
 
-            let result = routing_context
-                .app_message(target, message_data.clone())
-                .await;
-            match result {
-                Ok(_) => {
-                    self.clone().update_outbound_last_timestamp_to_now();
+                // match message.payload.encode(&mut message_data) {
+                //     Ok(_) => {
+                //         info!("VeilidStream | encode_connect | OK {:?}", message_data);
+                //     }
+                //     Err(e) => {
+                //         error!("VeilidStream | encode_connect | {:?}", e);
+                //     }
+                // }
 
-                    debug!(
-                        "VeilidStream | send_app_msg | I have {:?} | sending {:?}",
-                        received_seq, message.seq,
-                    )
-                }
-                Err(e) => warn!("VeilidStream | send_app_msg {:?}", e),
+                let message_data =
+                    VeilidStream::encode_message(received_seq, message.seq, message.data.into());
+
+                let stream = self.clone();
+
+                task::spawn(async move {
+                    let result = routing_context
+                        .with_safety(veilid_core::SafetySelection::Unsafe(
+                            veilid_core::Sequencing::NoPreference,
+                        ))
+                        .unwrap()
+                        .app_message(target, message_data)
+                        .await;
+
+                    match result {
+                        Ok(_) => {
+                            stream.update_outbound_last_timestamp_to_now();
+
+                            debug!(
+                                "VeilidStream | send_app_msg | I have {:?} | sending {:?}",
+                                received_seq, message.seq,
+                            )
+                        }
+                        Err(e) => error!("VeilidStream | send_app_msg {:?}", e),
+                    }
+                });
             }
+            // }
         }
 
         self.clone()
     }
 
-    pub async fn send_status_if_stale(self: &Arc<VeilidStream>) -> Arc<Self> {
+    pub fn send_status_if_stale(self: &Arc<VeilidStream>) -> Arc<Self> {
         trace!("VeilidStream | send_status_if_stale");
 
         let timeout_duration = Duration::new(SETTINGS.connection_keepalive_timeout, 0);
@@ -583,25 +622,30 @@ impl VeilidStream {
             let message_data = VeilidStream::encode_message(received_seq, sent_seq, data.into());
 
             let veilid_stream_clone = Arc::clone(self);
+
             task::spawn(async move {
-                let routing_context = veilid_stream_clone.api.routing_context();
+                if let Ok(routing_context) = veilid_stream_clone.api.routing_context() {
+                    let result = routing_context
+                        .with_safety(veilid_core::SafetySelection::Unsafe(
+                            veilid_core::Sequencing::NoPreference,
+                        ))
+                        .unwrap()
+                        .app_message(target, message_data.clone())
+                        .await;
 
-                let result = routing_context
-                    .app_message(target, message_data.clone())
-                    .await;
+                    match result {
+                        Ok(_) => {
+                            veilid_stream_clone
+                                .clone()
+                                .update_outbound_last_timestamp_to_now();
 
-                match result {
-                    Ok(_) => {
-                        veilid_stream_clone
-                            .clone()
-                            .update_outbound_last_timestamp_to_now();
-
-                        debug!(
-                            "VeilidStream | send_status_if_stale | I have {:?} | I sent {:?}",
-                            received_seq, sent_seq
-                        )
+                            debug!(
+                                "VeilidStream | send_status_if_stale | I have {:?} | I sent {:?}",
+                                received_seq, sent_seq
+                            )
+                        }
+                        Err(e) => error!("VeilidStream | send_status_if_stale {:?}", e),
                     }
-                    Err(e) => warn!("VeilidStream | send_app_msg {:?}", e),
                 }
             });
         }
@@ -610,104 +654,43 @@ impl VeilidStream {
     }
 }
 
-pub struct VeilidStreamManager {
-    streams: Arc<Mutex<HashMap<TargetWrapper, Arc<VeilidStream>>>>,
-}
+// #[derive(Debug)]
+// pub struct TargetWrapper(Target);
 
-lazy_static! {
-    pub static ref VEILID_STREAM_MANAGER: VeilidStreamManager = {
-        VeilidStreamManager {
-            streams: Arc::new(Mutex::new(HashMap::new())),
-        }
-    };
-}
+// impl TargetWrapper {
+//     pub fn new(target: Target) -> Self {
+//         Self(target)
+//     }
+// }
 
-impl VeilidStreamManager {
-    pub fn insert_stream(stream: Arc<VeilidStream>) {
-        debug!("VeilidStreamManager | insert_stream");
-        let target = stream.remote_target.clone();
-        let wrapped_target = TargetWrapper(target);
-        let mut streams = VEILID_STREAM_MANAGER.streams.lock().unwrap();
-        streams.insert(wrapped_target, stream);
-    }
+// impl PartialEq for TargetWrapper {
+//     fn eq(&self, other: &Self) -> bool {
+//         match (&self.0, &other.0) {
+//             (Target::NodeId(key1), Target::NodeId(key2)) => key1 == key2,
+//             (Target::PrivateRoute(route_id1), Target::PrivateRoute(route_id2)) => {
+//                 route_id1 == route_id2
+//             }
+//             _ => false,
+//         }
+//     }
+// }
 
-    pub fn remove_stream(stream: Arc<VeilidStream>) {
-        let target = stream.remote_target.clone();
-        let wrapped_target = TargetWrapper(target);
-        let mut streams = VEILID_STREAM_MANAGER.streams.lock().unwrap();
-        streams.remove(&wrapped_target);
-    }
+// impl Eq for TargetWrapper {}
 
-    pub fn get_stream(target: &Target) -> Option<Arc<VeilidStream>> {
-        let wrapped_target = TargetWrapper(target.clone());
-        let streams = VEILID_STREAM_MANAGER.streams.lock().unwrap();
-        streams.get(&wrapped_target).cloned()
-    }
-
-    pub async fn get_all() -> Vec<Arc<VeilidStream>> {
-        // Acquire a lock on the streams collection
-        let streams = VEILID_STREAM_MANAGER.streams.lock().unwrap();
-
-        // Collect all VeilidStream references into a vector and return it
-        streams.values().cloned().collect()
-    }
-
-    pub async fn clean() {
-        let now = Instant::now();
-        let timeout_duration = Duration::new(SETTINGS.stream_timeout_secs, 0);
-
-        // Acquire a lock on the streams collection
-        let mut streams = VEILID_STREAM_MANAGER.streams.lock().unwrap();
-        let old = streams.len();
-
-        // Retain only the streams that have not exceeded the timeout
-        streams.retain(|_, stream| {
-            // Acquire a lock on the last_active_timestamp field of the stream
-            let last_active = stream.inbound_last_timestamp.lock().unwrap();
-
-            // Compare the last active timestamp to the current time and timeout duration
-            now.duration_since(*last_active) <= timeout_duration
-        });
-        let new = streams.len();
-        if new < old {
-            info!(
-                "VeilidStreamManager | clean | removed streams {:?}",
-                old - new
-            )
-        }
-    }
-}
-
-struct TargetWrapper(Target);
-
-impl PartialEq for TargetWrapper {
-    fn eq(&self, other: &Self) -> bool {
-        match (&self.0, &other.0) {
-            (Target::NodeId(key1), Target::NodeId(key2)) => key1 == key2,
-            (Target::PrivateRoute(route_id1), Target::PrivateRoute(route_id2)) => {
-                route_id1 == route_id2
-            }
-            _ => false,
-        }
-    }
-}
-
-impl Eq for TargetWrapper {}
-
-impl std::hash::Hash for TargetWrapper {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        match &self.0 {
-            Target::NodeId(key) => {
-                "NodeId".hash(state);
-                key.hash(state);
-            }
-            Target::PrivateRoute(route_id) => {
-                "PrivateRoute".hash(state);
-                route_id.hash(state);
-            }
-        }
-    }
-}
+// impl std::hash::Hash for TargetWrapper {
+//     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+//         match &self.0 {
+//             Target::NodeId(key) => {
+//                 "NodeId".hash(state);
+//                 key.hash(state);
+//             }
+//             Target::PrivateRoute(route_id) => {
+//                 "PrivateRoute".hash(state);
+//                 route_id.hash(state);
+//             }
+//         }
+//     }
+// }
 
 // #[cfg(test)]
 // mod tests {
@@ -797,11 +780,11 @@ impl std::hash::Hash for TargetWrapper {
 //         // add two messages
 //         let msg = VeilidMessage::new(mock_connection.clone(), Arc::from("data1".as_bytes()));
 //         let seq = VeilidSliceManager::insert_outgoing_message(msg);
-//         trace!("test_process_outgoing_messages | inserted {:?}", seq);
+//         debug!("test_process_outgoing_messages | inserted {:?}", seq);
 
 //         let msg = VeilidMessage::new(mock_connection.clone(), Arc::from("data2".as_bytes()));
 //         let seq = VeilidSliceManager::insert_outgoing_message(msg);
-//         trace!("test_process_outgoing_messages | inserted {:?}", seq);
+//         debug!("test_process_outgoing_messages | inserted {:?}", seq);
 
 //         let outgoing_messages = VEILID_MESSAGES_MANAGER.outgoing_messages.lock().unwrap();
 //         assert_eq!(
@@ -835,7 +818,7 @@ impl std::hash::Hash for TargetWrapper {
 
 //         let msg = VeilidMessage::new(mock_connection.clone(), Arc::from("data2".as_bytes()));
 //         let seq = VeilidSliceManager::insert_outgoing_message(msg);
-//         trace!("test_process_outgoing_messages | inserted {:?}", seq);
+//         debug!("test_process_outgoing_messages | inserted {:?}", seq);
 
 //         VeilidSliceManager::process_outgoing_messages().await;
 
