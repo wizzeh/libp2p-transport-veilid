@@ -67,7 +67,7 @@ const SETTINGS: Settings = Settings {
     // Send a status message, if the node hasn't sent another message
     connection_keepalive_timeout: 5,
     // delete the stream if no message received by timeout
-    stream_timeout_secs: 30,
+    stream_timeout_secs: 15,
 };
 
 pub struct VeilidTransport<VeilidConnection> {
@@ -144,14 +144,6 @@ impl<T> VeilidTransport<T> {
         this.events.pop_front()
     }
 }
-
-// impl Default for VeilidTransport<VeilidConnection> {
-//     fn default() -> Self {
-//         let node_keys = Keypair::generate_ed25519();
-
-//         Self::new(None, node_keys)
-//     }
-// }
 
 impl<T> Transport for VeilidTransport<T> {
     type Output = VeilidConnection;
@@ -339,7 +331,7 @@ impl<T> Transport for VeilidTransport<T> {
                     return Poll::Ready(event);
                 }
                 Poll::Ready(None) => {
-                    // The listener stream has ended; handle this as needed
+                    // The listener stream has ended
                 }
                 Poll::Pending => {
                     // The listener has no events available at the moment
@@ -357,19 +349,40 @@ impl<T> Transport for VeilidTransport<T> {
 }
 
 fn heartbeat<T>(transport: &mut Pin<&mut VeilidTransport<T>>) {
-    info!("VeilidTransport | heartbeat");
+    trace!("VeilidTransport | heartbeat");
+
+    let mut to_delete = Vec::new();
 
     if let Some(listener) = &transport.listener {
         let map = listener.streams.lock().unwrap();
         let streams = map.values().cloned();
         for stream in streams {
-            stream
-                // send our status if we haven't sent anything recently
-                .send_status_if_stale()
-                // generate messages for whatever is in the buffer to clear it
-                .generate_messages(0)
-                // try send any undelivered messages
-                .send_app_msg();
+            if stream.is_active() {
+                stream
+                    // send our status if we haven't sent anything recently
+                    .send_status_if_stale()
+                    // generate messages for whatever is in the buffer to clear it
+                    .generate_messages(0)
+                    // try send any undelivered messages
+                    .send_app_msg();
+            } else {
+                info!(
+                    "VeilidTransport | heartbeat | stream is inactive {:?}",
+                    stream.remote_target
+                );
+                to_delete.push(stream.remote_target);
+            }
+        }
+    }
+
+    if let Some(listener) = &transport.listener {
+        for remote_target in to_delete {
+            let mut map = listener.streams.lock().unwrap();
+            map.remove(&remote_target);
+            info!(
+                "VeilidTransport | heartbeat | deleted stream {:?}",
+                remote_target
+            );
         }
     }
 }

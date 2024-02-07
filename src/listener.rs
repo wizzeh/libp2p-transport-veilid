@@ -21,7 +21,7 @@ use tokio_crate::sync::{
 use veilid_core::{Target, VeilidAPI, VeilidUpdate};
 
 use crate::connection::VeilidConnection;
-use crate::stream::{StreamStatus, VeilidStream};
+use crate::stream::VeilidStream;
 use crate::utils::{
     cryptotyped_to_multiaddr, cryptotyped_to_target, get_my_node_id_from_veilid_state_config,
     get_veilid_state_config,
@@ -39,6 +39,8 @@ enum ListenerStatus {
     Online,
 }
 
+type Streams = Arc<Mutex<HashMap<Target, Arc<VeilidStream>>>>;
+
 #[derive(Debug)]
 pub struct VeilidListener {
     pub id: ListenerId,
@@ -48,7 +50,7 @@ pub struct VeilidListener {
     api: Option<Arc<VeilidAPI>>,
     node_status: Arc<RwLock<NodeStatus>>,
     status: Arc<RwLock<ListenerStatus>>,
-    pub streams: Arc<Mutex<HashMap<Target, Arc<VeilidStream>>>>,
+    pub streams: Streams,
 }
 
 impl VeilidListener {
@@ -145,6 +147,12 @@ async fn convert_update(
     node_status: Arc<RwLock<NodeStatus>>,
     listener_status: Arc<RwLock<ListenerStatus>>,
 ) -> Poll<Option<VeilidTransportEvent<VeilidConnection>>> {
+    fn delete_stream(streams: Streams, remote_target: Target) {
+        if let Ok(mut streams) = streams.lock() {
+            streams.remove(&remote_target);
+        }
+    }
+
     match update {
         VeilidUpdate::Log(_) => {
             debug!("VeilidUpdate | Log");
@@ -154,6 +162,8 @@ async fn convert_update(
         VeilidUpdate::AppMessage(app_msg) => {
             debug!("VeilidUpdate | AppMessage");
             debug!("VeilidUpdate | AppMessage : {:?}", app_msg);
+            let mut should_disconnect = false;
+            let mut should_delete = false;
 
             let api = api.unwrap();
 
@@ -163,7 +173,6 @@ async fn convert_update(
             }
 
             let sender = app_msg.sender().unwrap();
-            // let _remote_addr = cryptotyped_to_multiaddr(sender);
             let remote_target = cryptotyped_to_target(sender);
 
             let (delivered_seq, seq, data) = match VeilidStream::decode_message(&app_msg.message())
@@ -187,106 +196,129 @@ async fn convert_update(
                 String::from_utf8_lossy(&data)
             );
 
-            //
-            // CONNECT
-            if String::from_utf8_lossy(&data).starts_with("\u{7}\0\0\0CONNECT") {
-                info!("VeilidUpdate | AppMessage | Connect");
-
-                let veilid_state_config = get_veilid_state_config(Some(api.clone())).unwrap();
-                let node_id = get_my_node_id_from_veilid_state_config(veilid_state_config).unwrap();
-
-                let local_addr = cryptotyped_to_multiaddr(&node_id);
-                let local_target = cryptotyped_to_target(&node_id);
-
-                let remote_addr = cryptotyped_to_multiaddr(sender);
-                let remote_target = cryptotyped_to_target(sender);
-
-                let stream = Arc::new(VeilidStream::new(api.clone(), remote_target.clone()));
-
-                streams
-                    .lock()
-                    .unwrap()
-                    .insert(remote_target, stream.clone());
-
-                let connection = VeilidConnection::new(
-                    api,
-                    local_target.clone(),
-                    remote_target.clone(),
-                    stream.clone(),
-                )
-                .unwrap();
-
-                // Remove "CONNECT" prefix from data
-                let data_without_connect: Vec<u8> = match String::from_utf8(data.clone()) {
-                    Ok(string) => {
-                        if let Some(stripped) = string.strip_prefix("\u{7}\0\0\0CONNECT") {
-                            stripped.as_bytes().to_vec()
-                        } else {
-                            string.as_bytes().to_vec() // If the prefix is not present, return the original string
-                        }
-                    }
-                    Err(e) => {
-                        error!("VeilidUpdate | AppMessage | Connect {:?}", e);
-                        data // If there's an error, return the original data
-                    }
-                };
-
-                let status = stream.recv_message(delivered_seq, seq, data_without_connect);
-
-                match status {
-                    StreamStatus::Active => {
-                        return Poll::Ready(Some(TransportEvent::Incoming {
-                            listener_id,
-                            upgrade: future::ok(connection),
-                            local_addr,
-                            send_back_addr: remote_addr,
-                        }));
-                    }
-                    StreamStatus::Expired => {
-                        return Poll::Pending;
-                    }
-                }
+            enum MessageType {
+                Connect,
+                Status,
+                Disconnect,
+                Data,
             }
 
-            //
-            // STATUS
-            if String::from_utf8_lossy(&data).starts_with("STATUS") {
-                info!(
-                    "VeilidUpdate | AppMessage | Status | they have {:?} they sent {:?}",
-                    delivered_seq, seq
-                );
-
-                if let Some(stream) = streams.lock().unwrap().get(&remote_target) {
-                    stream
-                        .update_outbound_delivered_seq(delivered_seq)
-                        .update_inbound_last_timestamp_to_now();
-                } else {
-                    // disconnect(api, remote_target).await;
-                }
-
-                return Poll::Pending;
-            }
-            //
-            // DISCONNECT
-            if String::from_utf8_lossy(&data).starts_with("DISCONNECT") {
-                info!("VeilidUpdate | AppMessage | DISCONNECT");
-
-                // delete any stream
-                if let Some(stream) = streams.lock().unwrap().get(&remote_target) {
-                    stream.clone().update_status(StreamStatus::Expired);
-                }
-
-                return Poll::Pending;
-            }
-            //
-            // All other payloads
-
-            debug!("VeilidUpdate | AppMessage | data packet");
-            if let Some(stream) = streams.lock().unwrap().get(&remote_target) {
-                let stream = stream.clone();
-                stream.recv_message(delivered_seq, seq, data);
+            // Determine message type
+            let message_type = if String::from_utf8_lossy(&data).starts_with("\u{7}\0\0\0CONNECT") {
+                MessageType::Connect
+            } else if String::from_utf8_lossy(&data).starts_with("STATUS") {
+                MessageType::Status
+            } else if String::from_utf8_lossy(&data).starts_with("DISCONNECT") {
+                MessageType::Disconnect
             } else {
-                error!("VeilidUpdate | AppMessage | Other message | stream not found")
+                MessageType::Data
+            };
+
+            match message_type {
+                MessageType::Connect => {
+                    info!("VeilidUpdate | AppMessage | Connect");
+
+                    let veilid_state_config = get_veilid_state_config(Some(api.clone())).unwrap();
+                    let node_id =
+                        get_my_node_id_from_veilid_state_config(veilid_state_config).unwrap();
+
+                    let local_addr = cryptotyped_to_multiaddr(&node_id);
+                    let local_target = cryptotyped_to_target(&node_id);
+
+                    let remote_addr = cryptotyped_to_multiaddr(sender);
+                    let remote_target = cryptotyped_to_target(sender);
+
+                    let stream = Arc::new(VeilidStream::new(api.clone(), remote_target.clone()));
+
+                    streams
+                        .lock()
+                        .unwrap()
+                        .insert(remote_target, stream.clone());
+
+                    let connection = VeilidConnection::new(
+                        api,
+                        local_target.clone(),
+                        remote_target.clone(),
+                        stream.clone(),
+                    )
+                    .unwrap();
+
+                    // Remove "CONNECT" prefix from data
+                    let data_without_connect: Vec<u8> = match String::from_utf8(data.clone()) {
+                        Ok(string) => {
+                            if let Some(stripped) = string.strip_prefix("\u{7}\0\0\0CONNECT") {
+                                stripped.as_bytes().to_vec()
+                            } else {
+                                string.as_bytes().to_vec() // If the prefix is not present, return the original string
+                            }
+                        }
+                        Err(e) => {
+                            error!("VeilidUpdate | AppMessage | Connect {:?}", e);
+                            data // If there's an error, return the original data
+                        }
+                    };
+
+                    stream.recv_message(delivered_seq, seq, data_without_connect);
+
+                    return Poll::Ready(Some(TransportEvent::Incoming {
+                        listener_id,
+                        upgrade: future::ok(connection),
+                        local_addr,
+                        send_back_addr: remote_addr,
+                    }));
+                }
+                MessageType::Status => {
+                    info!(
+                        "VeilidUpdate | AppMessage | Status | they have {:?} they sent {:?}",
+                        delivered_seq, seq
+                    );
+
+                    if let Some(stream) = streams.lock().unwrap().get(&remote_target) {
+                        if stream.is_active() {
+                            stream
+                                .update_outbound_delivered_seq(delivered_seq)
+                                .update_inbound_last_timestamp_to_now();
+                        } else {
+                            debug!(
+                                "VeilidUpdate | AppMessage | Status | stream inactive, sending disconnect and closing"
+                            );
+                            should_disconnect = true;
+                            should_delete = true;
+                        }
+                    } else {
+                        debug!(
+                            "VeilidUpdate | AppMessage | Status | no stream, sending disconnect"
+                        );
+                        should_disconnect = true;
+                    }
+                }
+                MessageType::Disconnect => {
+                    info!("VeilidUpdate | AppMessage | DISCONNECT");
+                    should_delete = true;
+                }
+                MessageType::Data => {
+                    debug!("VeilidUpdate | AppMessage | data packet");
+                    if let Some(stream) = streams.lock().unwrap().get(&remote_target) {
+                        if stream.is_active() {
+                            let stream = stream.clone();
+                            stream.recv_message(delivered_seq, seq, data);
+                        } else {
+                            should_disconnect = true;
+                            should_delete = true;
+                        }
+                    } else {
+                        error!("VeilidUpdate | AppMessage | Other message | stream not found");
+                        should_disconnect = true;
+                    }
+                }
+            }
+
+            if should_disconnect {
+                disconnect(api, remote_target).await;
+            }
+
+            if should_delete {
+                delete_stream(streams, remote_target);
             }
 
             return Poll::Pending;

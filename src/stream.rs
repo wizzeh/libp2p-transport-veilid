@@ -18,11 +18,11 @@ use crate::SETTINGS;
 // the local and remote nodes. Processes fetch a stream by its remote target
 // using VeilidStreamManager
 
-#[derive(Debug)]
-pub enum StreamStatus {
-    Active,
-    Expired,
-}
+// #[derive(Debug, PartialEq)]
+// pub enum StreamStatus {
+//     Active,
+//     Expired,
+// }
 
 #[derive(Debug, Clone)]
 pub struct OutboundMessage {
@@ -36,7 +36,7 @@ pub struct VeilidStream {
     // reference to Veilid's API
     pub api: Arc<VeilidAPI>,
     // the address of the remote Veilid node
-    remote_target: Target,
+    pub remote_target: Target,
     // handle to wake AsyncRead for VeilidConnection
     waker: Arc<Mutex<Option<Waker>>>,
     //
@@ -64,7 +64,7 @@ pub struct VeilidStream {
     // last outbound message sent timestamp
     outbound_last_timestamp: Arc<Mutex<Instant>>,
     // so the connection can close
-    pub status: Arc<Mutex<StreamStatus>>,
+    // pub status: Arc<Mutex<StreamStatus>>,
 }
 
 impl VeilidStream {
@@ -86,7 +86,7 @@ impl VeilidStream {
             outbound_last_timestamp: Arc::new(Mutex::new(Instant::now())),
 
             waker: Arc::new(Mutex::new(None)),
-            status: Arc::new(Mutex::new(StreamStatus::Active)),
+            // status: Arc::new(Mutex::new(StreamStatus::Active)),
         }
         // VeilidStreamManager::insert_stream(stream.into());
     }
@@ -107,18 +107,25 @@ impl VeilidStream {
         self.clone()
     }
 
-    pub fn update_status(self: Arc<VeilidStream>, status: StreamStatus) -> Arc<Self> {
-        debug!("VeilidStream | update_status");
+    // pub fn update_status(self: Arc<VeilidStream>, status: StreamStatus) -> Arc<Self> {
+    //     debug!("VeilidStream | update_status");
 
-        let mut stream_status = self.status.lock().unwrap();
+    //     let mut stream_status = self.status.lock().unwrap();
 
-        *stream_status = status;
-        self.clone()
-    }
+    //     *stream_status = status;
+    //     self.clone()
+    // }
 
     pub fn is_active(&self) -> bool {
         debug!("VeilidStream | is_active");
-        // the stream is active if we've received a message within the timeout deadline
+        // the stream is active if we've received a message within the timeout deadline and it's not expired
+
+        // if let Ok(guard) = self.status.lock() {
+        //     if *guard == StreamStatus::Expired {
+        //         return false;
+        //     }
+        // }
+
         let seconds = SETTINGS.stream_timeout_secs;
         let last_active = self.inbound_last_timestamp.lock().unwrap();
         *last_active > Instant::now() - Duration::new(seconds, 0)
@@ -162,12 +169,7 @@ impl VeilidStream {
         Ok((delivered_seq, seq, data))
     }
 
-    pub fn recv_message(
-        self: Arc<VeilidStream>,
-        delivered_seq: u32,
-        seq: u32,
-        data: Vec<u8>,
-    ) -> StreamStatus {
+    pub fn recv_message(self: Arc<VeilidStream>, delivered_seq: u32, seq: u32, data: Vec<u8>) {
         // if !self.is_active() {
         //     debug!("VeilidStream | recv_message | expired");
         //     return StreamStatus::Expired;
@@ -203,7 +205,7 @@ impl VeilidStream {
                 }
                 Err(e) => {
                     error!("VeilidStream | recv_message {:?}", e);
-                    return StreamStatus::Expired;
+                    // return StreamStatus::Expired;
                 }
             }
         } else {
@@ -241,7 +243,7 @@ impl VeilidStream {
                 }
                 Err(e) => {
                     error!("VeilidStream | recv_message {:?}", e);
-                    return StreamStatus::Expired;
+                    // return StreamStatus::Expired;
                 }
             }
         };
@@ -254,7 +256,7 @@ impl VeilidStream {
             .update_inbound_stream();
         // .set();
 
-        return StreamStatus::Active;
+        // return StreamStatus::Active;
     }
 
     pub fn recv_inbound_buffer(&self, data: &[u8]) {
@@ -606,7 +608,7 @@ impl VeilidStream {
     }
 
     pub fn send_status_if_stale(self: &Arc<VeilidStream>) -> Arc<Self> {
-        trace!("VeilidStream | send_status_if_stale");
+        debug!("VeilidStream | send_status_if_stale");
 
         let timeout_duration = Duration::new(SETTINGS.connection_keepalive_timeout, 0);
         let now = Instant::now();
@@ -653,44 +655,6 @@ impl VeilidStream {
         self.clone()
     }
 }
-
-// #[derive(Debug)]
-// pub struct TargetWrapper(Target);
-
-// impl TargetWrapper {
-//     pub fn new(target: Target) -> Self {
-//         Self(target)
-//     }
-// }
-
-// impl PartialEq for TargetWrapper {
-//     fn eq(&self, other: &Self) -> bool {
-//         match (&self.0, &other.0) {
-//             (Target::NodeId(key1), Target::NodeId(key2)) => key1 == key2,
-//             (Target::PrivateRoute(route_id1), Target::PrivateRoute(route_id2)) => {
-//                 route_id1 == route_id2
-//             }
-//             _ => false,
-//         }
-//     }
-// }
-
-// impl Eq for TargetWrapper {}
-
-// impl std::hash::Hash for TargetWrapper {
-//     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-//         match &self.0 {
-//             Target::NodeId(key) => {
-//                 "NodeId".hash(state);
-//                 key.hash(state);
-//             }
-//             Target::PrivateRoute(route_id) => {
-//                 "PrivateRoute".hash(state);
-//                 route_id.hash(state);
-//             }
-//         }
-//     }
-// }
 
 // #[cfg(test)]
 // mod tests {

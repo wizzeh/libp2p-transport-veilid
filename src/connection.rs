@@ -1,7 +1,8 @@
 use futures::{AsyncRead, AsyncWrite};
 
 use std::{
-    fmt, io,
+    fmt,
+    io::{self, Error},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -57,11 +58,15 @@ impl AsyncRead for VeilidConnection {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        // info!("AsyncWrite for VeilidConnection | poll_read");
+        debug!("AsyncRead for VeilidConnection | poll_read");
 
-        match self.stream.read_inbound_stream(cx, buf) {
-            Some(readable) => Poll::Ready(Ok(readable)),
-            None => Poll::Pending,
+        if self.stream.is_active() {
+            match self.stream.read_inbound_stream(cx, buf) {
+                Some(readable) => Poll::Ready(Ok(readable)),
+                None => Poll::Pending,
+            }
+        } else {
+            Poll::Ready(Err(Error::other("Stream is inactive")))
         }
     }
 }
@@ -72,22 +77,25 @@ impl AsyncWrite for VeilidConnection {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        // info!("AsyncWrite for VeilidConnection | poll_write");
         debug!(
             "AsyncWrite for VeilidConnection | poll_write | buf size {:?}",
             buf.len()
         );
 
-        let data = buf;
-        let byte_count = data.len();
+        if self.stream.is_active() {
+            let data = buf;
+            let byte_count = data.len();
 
-        debug!(
-            "AsyncWrite for VeilidConnection | poll_write | try send {:?}",
-            std::str::from_utf8(&data).unwrap_or("[Invalid UTF-8]")
-        );
+            debug!(
+                "AsyncWrite for VeilidConnection | poll_write | try send {:?}",
+                std::str::from_utf8(&data).unwrap_or("[Invalid UTF-8]")
+            );
 
-        self.stream.insert_to_outbound_stream(data);
-        Poll::Ready(Ok(byte_count))
+            self.stream.insert_to_outbound_stream(data);
+            Poll::Ready(Ok(byte_count))
+        } else {
+            Poll::Ready(Err(Error::other("Stream is inactive")))
+        }
     }
 
     // Not used
