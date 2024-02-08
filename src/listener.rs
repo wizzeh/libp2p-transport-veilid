@@ -335,7 +335,6 @@ async fn convert_update(
             let mut node_status = node_status.write().unwrap();
 
             let mut is_online = false;
-            // we need to update the connection or stream
 
             let is_attached = match attach_state.state {
                 veilid_core::AttachmentState::Detached => false,

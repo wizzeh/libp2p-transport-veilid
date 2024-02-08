@@ -55,6 +55,7 @@ struct Settings {
     connection_keepalive_timeout: u64,
     message_retry_timeout: u64,
     stream_timeout_secs: u64,
+    heartbeat_secs: u64,
 }
 
 const SETTINGS: Settings = Settings {
@@ -64,10 +65,12 @@ const SETTINGS: Settings = Settings {
     transport_stream_packet_data_size_bytes: 32760,
     // when to retry sending an undelivered message
     message_retry_timeout: 5,
-    // Send a status message, if the node hasn't sent another message
+    // Send a status message, if no other message has been sent
     connection_keepalive_timeout: 5,
     // delete the stream if no message received by timeout
     stream_timeout_secs: 15,
+    // background process frequency
+    heartbeat_secs: 1,
 };
 
 pub struct VeilidTransport<VeilidConnection> {
@@ -112,7 +115,7 @@ impl VeilidTransport<VeilidConnection> {
         let (tx, rx) = channel::<VeilidUpdate>(32);
         let update_callback = create_update_callback(tx);
 
-        let heartbeat_duration = Duration::from_secs(5).clone();
+        let heartbeat_duration = Duration::from_secs(SETTINGS.heartbeat_secs).clone();
 
         Self {
             update_callback: Some(update_callback),
@@ -360,11 +363,7 @@ fn heartbeat<T>(transport: &mut Pin<&mut VeilidTransport<T>>) {
             if stream.is_active() {
                 stream
                     // send our status if we haven't sent anything recently
-                    .send_status_if_stale()
-                    // generate messages for whatever is in the buffer to clear it
-                    .generate_messages(0)
-                    // try send any undelivered messages
-                    .send_app_msg();
+                    .send_status_if_stale();
             } else {
                 info!(
                     "VeilidTransport | heartbeat | stream is inactive {:?}",

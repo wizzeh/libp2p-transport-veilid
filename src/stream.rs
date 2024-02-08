@@ -458,21 +458,18 @@ impl VeilidStream {
         // Spawn a separate thread to generate and send messages
         let veilid_stream_clone = Arc::clone(self);
         task::spawn(async move {
-            veilid_stream_clone
-                // .generate_messages(SETTINGS.transport_stream_packet_data_size_bytes)
-                .generate_messages(0)
-                .send_app_msg();
+            veilid_stream_clone.generate_messages().send_app_msg();
         });
     }
 
-    pub fn generate_messages(self: &Arc<Self>, buf_min: usize) -> Arc<Self> {
+    pub fn generate_messages(self: &Arc<Self>) -> Arc<Self> {
         trace!("VeilidStream | generate_messages | start");
         let data_limit = SETTINGS.transport_stream_packet_data_size_bytes;
 
         // Lock the outbound buffer once and keep the lock until we're done.
         let mut stream = self.outbound_stream.lock().unwrap();
 
-        while stream.len() > buf_min {
+        while stream.len() > 0 {
             let mut msg: Vec<u8> = Vec::new();
             let drain_limit = usize::min(data_limit, stream.len());
             let slice: Vec<u8> = stream.drain(..drain_limit).collect();
@@ -563,17 +560,6 @@ impl VeilidStream {
 
                 let received_seq = self.get_inbound_received_seq();
 
-                // let message_data: Vec<u8> = Vec::new();
-
-                // match message.payload.encode(&mut message_data) {
-                //     Ok(_) => {
-                //         info!("VeilidStream | encode_connect | OK {:?}", message_data);
-                //     }
-                //     Err(e) => {
-                //         error!("VeilidStream | encode_connect | {:?}", e);
-                //     }
-                // }
-
                 let message_data =
                     VeilidStream::encode_message(received_seq, message.seq, message.data.into());
 
@@ -601,20 +587,20 @@ impl VeilidStream {
                     }
                 });
             }
-            // }
         }
 
         self.clone()
     }
 
     pub fn send_status_if_stale(self: &Arc<VeilidStream>) -> Arc<Self> {
-        debug!("VeilidStream | send_status_if_stale");
+        trace!("VeilidStream | send_status_if_stale");
 
         let timeout_duration = Duration::new(SETTINGS.connection_keepalive_timeout, 0);
         let now = Instant::now();
         let last_sent = self.outbound_last_timestamp.lock().unwrap();
 
         if now.duration_since(*last_sent) >= timeout_duration {
+            debug!("VeilidStream | send_status_if_stale | sending");
             let target = self.remote_target.clone();
 
             let sent_seq = self.get_outbound_last_seq();
