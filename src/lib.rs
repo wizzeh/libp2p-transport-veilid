@@ -70,7 +70,7 @@ const SETTINGS: Settings = Settings {
     // delete the stream if no message received by timeout
     stream_timeout_secs: 15,
     // background process frequency
-    heartbeat_secs: 1,
+    heartbeat_secs: 5,
 };
 
 pub struct VeilidTransport<VeilidConnection> {
@@ -335,6 +335,7 @@ impl<T> Transport for VeilidTransport<T> {
                 }
                 Poll::Ready(None) => {
                     // The listener stream has ended
+                    // return Poll::Ready(TransportEvent::ListenerClosed { listener_id: (), reason: () });
                 }
                 Poll::Pending => {
                     // The listener has no events available at the moment
@@ -362,8 +363,9 @@ fn heartbeat<T>(transport: &mut Pin<&mut VeilidTransport<T>>) {
         for stream in streams {
             if stream.is_active() {
                 stream
-                    // send our status if we haven't sent anything recently
-                    .send_status_if_stale();
+                    .send_status_if_stale()
+                    .generate_messages()
+                    .send_app_msg();
             } else {
                 info!(
                     "VeilidTransport | heartbeat | stream is inactive {:?}",

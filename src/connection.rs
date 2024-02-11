@@ -39,16 +39,9 @@ impl VeilidConnection {
         Ok(connection)
     }
 
-    // Send CONNECT to initiate the connection
     pub fn connect(&mut self) {
         debug!("VeilidConnection | connect: {:?}", self);
-
         self.stream.insert_to_outbound_stream(b"CONNECT");
-    }
-
-    pub async fn close(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // Logic to close the connection.
-        todo!()
     }
 }
 
