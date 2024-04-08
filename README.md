@@ -18,6 +18,8 @@ libp2p-transport-veilid = { path = "../packages/libp2p-transport-veilid"}
 
 ### Add the transport to your libp2p app
 
+Note: The example below no longer reflects how the Tickle app configures the transport. There is now a transport configuration with multiple transports so you can play around with TCP and Veilid. See the current Tickle main.rs file.  
+
 ```rust
 use libp2p_transport_veilid::VeilidTransport;
 use tokio::runtime::Handle;
@@ -48,23 +50,19 @@ let transp = VeilidTransport::new(Some(cloned_handle))
 
 ## Settings
 
-Veilid settings are in `./.veilid/`. If `settings` doesn't exist, the file is initialized from default settings from `settings.toml`.
+Veilid settings are in `./.veilid/{node_id}/settings`. If `settings` doesn't exist, the file is initialized from default settings from `settings.toml`. Node_id is generated from the keypair so that multiple instances of Veilid can run on a device (for testing purposes).
 
-Transport settings are in `Settings` in `lib.rs`.
+Transport settings are in `Settings` struct in `lib.rs`.
 
-`./.veilid/` contains the node's keys and other Veilid data structures. These are initilized at startup if they don't exist.
+`./.veilid/{node_id}` contains the node's keys and other Veilid data structures. These are initilized at startup if they don't exist.
 
 ## Key Components
 
-`listener.rs` - VeilidListener receives VeilidUpdate events from the VeilidAPI. This includes incoming data from remote nodes.
+`listener.rs` - VeilidListener receives VeilidUpdate events from the VeilidAPI. This includes incoming data from remote nodes. This struct contains the set of active streams.
 
-`connection.rs`- VeilidConnection represents the connection between the local node and the remote node. Veilid nodes are addressed by `Target` which are modeled like unix domain sockets to fit Libp2p's Multiaddr format `/unix/VLD0:ktJZt5efM1Qd8hxkRVI_NuAp2jOojv2Kkz7R6TxZcAc`.
+`connection.rs`- VeilidConnection represents the connection between the local node and the remote node. Veilid nodes are addressed by `Target` which are modeled in Libp2p like unix domain sockets to fit Libp2p's Multiaddr format `/unix/VLD0:ktJZt5efM1Qd8hxkRVI_NuAp2jOojv2Kkz7R6TxZcAc`. The connection struct has the active stream so that it can read and write data.
 
 `stream.rs` - VeilidStream represents the communication channel between the local and a remote node. Libp2p streams are converted into messages and fired off via Veilid's app_message(). The nodes use a sequencing and resync process to ensure undelivered messages are resent. The remote node reconstucts the libp2p stream from the message sequence.
-
-Streams are collected and fetched using VeilidStreamManager.
-
-`stream_handler.rs` - Runs background processes -- resending undelivered messages and cleaning up dead streams.
 
 ### More information
 
