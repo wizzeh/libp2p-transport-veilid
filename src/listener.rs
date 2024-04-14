@@ -161,7 +161,7 @@ async fn convert_update(
 
         VeilidUpdate::AppMessage(app_msg) => {
             debug!("VeilidUpdate | AppMessage");
-            debug!("VeilidUpdate | AppMessage : {:?}", app_msg);
+            trace!("VeilidUpdate | AppMessage : {:?}", app_msg);
             let mut should_disconnect = false;
             let mut should_delete = false;
 
@@ -191,7 +191,7 @@ async fn convert_update(
                 data.len()
             );
 
-            debug!(
+            trace!(
                 "VeilidUpdate | AppMessage | data {:?}",
                 String::from_utf8_lossy(&data)
             );

@@ -220,7 +220,7 @@ impl VeilidStream {
                 data.len()
             );
 
-            debug!(
+            trace!(
                 "VeilidStream | recv_message | received {:?}",
                 String::from_utf8_lossy(&data)
             );
@@ -266,7 +266,7 @@ impl VeilidStream {
 
         drop(read_buffer);
 
-        debug!(
+        trace!(
             "VeilidStream | recv_inbound_buffer | data {:?}",
             String::from_utf8_lossy(data)
         );
@@ -304,7 +304,7 @@ impl VeilidStream {
 
             let slice_len = u32::from_le_bytes(slice_len_bytes) as usize;
 
-            debug!(
+            trace!(
                 "VeilidStream | update_inbound_stream | inbound_buffer {:?}",
                 String::from_utf8_lossy(&inbound_buffer_guard.clone())
             );
@@ -322,7 +322,7 @@ impl VeilidStream {
                 // remove our u32
                 slice.drain(..4);
 
-                debug!(
+                trace!(
                     "VeilidStream | update_inbound_stream | slice {:?}",
                     String::from_utf8_lossy(&slice.clone())
                 );
@@ -352,7 +352,7 @@ impl VeilidStream {
                 inbound_stream_guard.extend(slice);
             }
 
-            debug!(
+            trace!(
                 "VeilidStream | update_inbound_stream | stream {:?}",
                 String::from_utf8_lossy(&inbound_stream_guard)
             );
@@ -368,7 +368,7 @@ impl VeilidStream {
 
     pub fn read_inbound_stream(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Option<usize> {
         let mut stream = self.inbound_stream.lock().unwrap();
-        debug!(
+        trace!(
             "VeilidStream | read_inbound_stream | stream {:?}",
             String::from_utf8_lossy(&stream)
         );
@@ -386,7 +386,7 @@ impl VeilidStream {
 
             let data: Vec<u8> = stream.drain(..readable).collect();
 
-            debug!(
+            trace!(
                 "VeilidStream | read_inbound_stream | {:?}",
                 String::from_utf8_lossy(&data)
             );
@@ -445,7 +445,7 @@ impl VeilidStream {
             data.len()
         );
 
-        debug!(
+        trace!(
             "VeilidStream | insert_outbound_stream | bytes {:?} | {:?}",
             data.len(),
             String::from_utf8_lossy(data)
@@ -508,7 +508,7 @@ impl VeilidStream {
         // add the msg data slice
         packet.extend_from_slice(&msg_data);
 
-        debug!(
+        trace!(
             "VeilidStream | encode_message | {:?} ",
             String::from_utf8_lossy(&packet)
         );
