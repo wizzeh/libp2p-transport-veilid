@@ -1,4 +1,3 @@
-use futures::future;
 use futures::{future::Ready, Stream};
 
 use libp2p::core::multiaddr::Protocol;
@@ -21,17 +20,16 @@ use tokio_crate::sync::{
 use veilid_core::{Target, VeilidAPI, VeilidUpdate};
 
 use crate::connection::VeilidConnection;
-use crate::stream::VeilidStream;
+use crate::stream::{StreamStatus, VeilidStream};
 use crate::utils::{
-    cryptotyped_to_multiaddr, cryptotyped_to_target, get_my_node_id_from_veilid_state_config,
-    get_veilid_state_config,
+    cryptotyped_to_target, get_my_node_id_from_veilid_state_config, get_veilid_state_config,
 };
 use crate::{errors::VeilidError, node_status::NodeStatus};
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 
-type VeilidTransportEvent<S> = TransportEvent<Ready<Result<S, VeilidError>>, VeilidError>;
+pub type VeilidTransportEvent<S> = TransportEvent<Ready<Result<S, VeilidError>>, VeilidError>;
 
 #[derive(Debug, PartialEq)]
 enum ListenerStatus {
@@ -72,6 +70,27 @@ impl VeilidListener {
             status: Arc::new(RwLock::new(ListenerStatus::Offline)),
             streams: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+    fn create_stream(
+        api: &Arc<VeilidAPI>,
+        remote_target: Target,
+        remote_stream_id: u64,
+        streams: &Streams,
+    ) -> Arc<VeilidStream> {
+        // create stream
+
+        let stream = Arc::new(VeilidStream::new(
+            api.clone(),
+            remote_target.clone(),
+            remote_stream_id,
+        ));
+
+        if let Ok(mut guard) = streams.lock() {
+            guard.insert(remote_target, stream.clone());
+        } else {
+            error!("VeilidListener | create_stream | failed to lock streams");
+        }
+        stream
     }
 }
 
@@ -147,12 +166,6 @@ async fn convert_update(
     node_status: Arc<RwLock<NodeStatus>>,
     listener_status: Arc<RwLock<ListenerStatus>>,
 ) -> Poll<Option<VeilidTransportEvent<VeilidConnection>>> {
-    fn delete_stream(streams: Streams, remote_target: Target) {
-        if let Ok(mut streams) = streams.lock() {
-            streams.remove(&remote_target);
-        }
-    }
-
     match update {
         VeilidUpdate::Log(_) => {
             debug!("VeilidUpdate | Log");
@@ -162,8 +175,6 @@ async fn convert_update(
         VeilidUpdate::AppMessage(app_msg) => {
             debug!("VeilidUpdate | AppMessage");
             trace!("VeilidUpdate | AppMessage : {:?}", app_msg);
-            let mut should_disconnect = false;
-            let mut should_delete = false;
 
             let api = api.unwrap();
 
@@ -174,21 +185,39 @@ async fn convert_update(
 
             let sender = app_msg.sender().unwrap();
             let remote_target = cryptotyped_to_target(sender);
+            debug!(
+                "VeilidUpdate | AppMessage | remote target {:?}",
+                remote_target
+            );
 
-            let (delivered_seq, seq, data) = match VeilidStream::decode_message(&app_msg.message())
-            {
-                Ok((r, s, d)) => (r, s, d),
-                Err(e) => {
-                    error!("VeilidUpdate | AppMessage {:?}", e);
-                    return Poll::Pending;
-                }
+            trace!("VeilidUpdate | AppMessage | streams {:?}", streams);
+
+            let option_stream = {
+                let mutex_guard = streams.lock().unwrap();
+                mutex_guard.get(&remote_target).map(Arc::clone)
             };
 
+            let outbound_last_seq = match option_stream {
+                Some(ref stream) => stream.get_outbound_last_seq(),
+                None => 0,
+            };
+
+            let (delivered_seq, seq, stream_id, data) =
+                match VeilidStream::decode_message(&app_msg.message()) {
+                    Ok((r, s, i, d)) => (r, s, i, d),
+                    Err(e) => {
+                        error!("VeilidUpdate | AppMessage {:?}", e);
+                        return Poll::Pending;
+                    }
+                };
+
             info!(
-                "VeilidUpdate | AppMessage | they have {:?} | they sent {:?} | bytes {:?}",
+                "VeilidUpdate | AppMessage | they have {:?} of {:?} | they sent {:?} | bytes {:?} on stream_id {:?}",
                 delivered_seq,
+                outbound_last_seq,
                 seq,
-                data.len()
+                data.len(),
+                stream_id
             );
 
             trace!(
@@ -197,128 +226,284 @@ async fn convert_update(
             );
 
             enum MessageType {
-                Connect,
+                Dial,
+                Listen,
                 Status,
-                Disconnect,
                 Data,
             }
 
             // Determine message type
-            let message_type = if String::from_utf8_lossy(&data).starts_with("\u{7}\0\0\0CONNECT") {
-                MessageType::Connect
+            let message_type = if String::from_utf8_lossy(&data).starts_with("DIAL") {
+                MessageType::Dial
+            } else if String::from_utf8_lossy(&data).starts_with("LISTEN") {
+                MessageType::Listen
             } else if String::from_utf8_lossy(&data).starts_with("STATUS") {
                 MessageType::Status
-            } else if String::from_utf8_lossy(&data).starts_with("DISCONNECT") {
-                MessageType::Disconnect
             } else {
                 MessageType::Data
             };
 
-            match message_type {
-                MessageType::Connect => {
-                    info!("VeilidUpdate | AppMessage | Connect");
-
-                    let veilid_state_config = get_veilid_state_config(Some(api.clone())).unwrap();
-                    let node_id =
-                        get_my_node_id_from_veilid_state_config(veilid_state_config).unwrap();
-
-                    let local_addr = cryptotyped_to_multiaddr(&node_id);
-                    let local_target = cryptotyped_to_target(&node_id);
-
-                    let remote_addr = cryptotyped_to_multiaddr(sender);
-                    let remote_target = cryptotyped_to_target(sender);
-
-                    let stream = Arc::new(VeilidStream::new(api.clone(), remote_target.clone()));
-
-                    streams
-                        .lock()
-                        .unwrap()
-                        .insert(remote_target, stream.clone());
-
-                    let connection = VeilidConnection::new(
-                        api,
-                        local_target.clone(),
-                        remote_target.clone(),
-                        stream.clone(),
-                    )
-                    .unwrap();
-
-                    // Remove "CONNECT" prefix from data
-                    let data_without_connect: Vec<u8> = match String::from_utf8(data.clone()) {
-                        Ok(string) => {
-                            if let Some(stripped) = string.strip_prefix("\u{7}\0\0\0CONNECT") {
-                                stripped.as_bytes().to_vec()
-                            } else {
-                                string.as_bytes().to_vec() // If the prefix is not present, return the original string
-                            }
-                        }
-                        Err(e) => {
-                            error!("VeilidUpdate | AppMessage | Connect {:?}", e);
-                            data // If there's an error, return the original data
-                        }
-                    };
-
-                    stream.recv_message(delivered_seq, seq, data_without_connect);
-
-                    return Poll::Ready(Some(TransportEvent::Incoming {
-                        listener_id,
-                        upgrade: future::ok(connection),
-                        local_addr,
-                        send_back_addr: remote_addr,
-                    }));
+            // refresh the stream if their stream_id is higher than previous
+            if let Some(ref stream) = option_stream {
+                if stream.get_remote_stream_id() == 0 {
+                    debug!(
+                        "VeilidUpdate | AppMessage | I dialed | now receiving their ID {:?}",
+                        stream_id
+                    );
+                    stream.update_remote_stream_id(stream_id);
+                } else {
+                    stream.update_inbound_last_timestamp_to_now();
                 }
-                MessageType::Status => {
-                    info!(
-                        "VeilidUpdate | AppMessage | Status | they have {:?} they sent {:?}",
-                        delivered_seq, seq
+            }
+
+            match option_stream {
+                None => {
+                    match message_type {
+                        MessageType::Dial => {
+                            // Happy Path
+                            debug!("VeilidUpdate | AppMessage | Stream None | received DIAL");
+
+                            let remote_stream_id = stream_id;
+
+                            let stream = VeilidListener::create_stream(
+                                &api,
+                                remote_target,
+                                remote_stream_id,
+                                &streams,
+                            );
+
+                            stream
+                                .update_remote_stream_id(stream_id)
+                                .update_status(StreamStatus::Listen)
+                                .send_listen()
+                                .await;
+
+                            return stream.activate(sender, remote_target, listener_id);
+                        }
+                        MessageType::Listen => {
+                            warn!("VeilidUpdate | AppMessage | Stream None | received LISTEN | ignoring");
+                            // should_disconnect = true;
+                            // should_delete = true;
+                        }
+
+                        MessageType::Status => {
+                            warn!("VeilidUpdate | AppMessage | Stream None | received STATUS");
+                            // should_disconnect = true;
+                        }
+                        MessageType::Data => {
+                            warn!("VeilidUpdate | AppMessage | Stream None | received DATA | ignoring");
+                            // should_disconnect = true;
+                        }
+                    }
+                }
+                Some(ref stream) => {
+                    debug!(
+                        "VeilidUpdate | AppMessage | they sent {:?} and my remote_stream_id is {:?}",
+                        stream_id, stream.get_remote_stream_id()
                     );
 
-                    if let Some(stream) = streams.lock().unwrap().get(&remote_target) {
-                        if stream.is_active() {
-                            stream
-                                .update_outbound_delivered_seq(delivered_seq)
-                                .update_inbound_last_timestamp_to_now();
-                        } else {
-                            debug!(
-                                "VeilidUpdate | AppMessage | Status | stream inactive, sending disconnect and closing"
+                    if stream.get_remote_stream_id() != 0
+                        && stream_id < stream.get_remote_stream_id()
+                    {
+                        debug!("VeilidUpdate | AppMessage | msg from previous stream | ignoring");
+                        return Poll::Pending;
+                    }
+
+                    let option_status = match stream.status.lock() {
+                        Err(e) => {
+                            error!(
+                                "VeilidUpdate | AppMessage | couldnt lock stream status {:?}",
+                                e
                             );
-                            should_disconnect = true;
-                            should_delete = true;
+                            None
                         }
-                    } else {
-                        debug!(
-                            "VeilidUpdate | AppMessage | Status | no stream, sending disconnect"
-                        );
-                        should_disconnect = true;
+                        Ok(status) => Some(status.clone()),
+                    };
+
+                    if let Some(status) = option_status {
+                        match status {
+                            StreamStatus::Dial => {
+                                match message_type {
+                                    MessageType::Dial => {
+                                        debug!(
+                                            "VeilidUpdate | AppMessage | Stream DIAL | received DIAL"
+                                        );
+                                        let veilid_state_config =
+                                            get_veilid_state_config(Some(api.clone())).unwrap();
+                                        let node_id = get_my_node_id_from_veilid_state_config(
+                                            veilid_state_config,
+                                        )
+                                        .unwrap();
+
+                                        let local_target = cryptotyped_to_target(&node_id);
+
+                                        // Need to choose role based on ID
+                                        match remote_target.cmp(&local_target) {
+                                            std::cmp::Ordering::Less => {
+                                                debug!(
+                                                    "VeilidUpdate | AppMessage | Stream DIAL | received DIAL | I'm the dialer"
+                                                );
+                                                stream
+                                                    .update_inbound_last_timestamp_to_now()
+                                                    .update_status(StreamStatus::Dial)
+                                                    .send_dial()
+                                                    .await;
+                                            }
+                                            std::cmp::Ordering::Equal => {
+                                                warn!(
+                                                    "VeilidUpdate | AppMessage | Stream DIAL | received DIAL | can't choose roles"
+                                                );
+                                                return Poll::Ready(None);
+                                            }
+                                            std::cmp::Ordering::Greater => {
+                                                debug!(
+                                                    "VeilidUpdate | AppMessage | Stream DIAL | received DIAL | I'm the listener"
+                                                );
+
+                                                stream
+                                                    .update_remote_stream_id(stream_id)
+                                                    .update_status(StreamStatus::Listen)
+                                                    .send_listen()
+                                                    .await;
+
+                                                return stream.activate(
+                                                    sender,
+                                                    remote_target,
+                                                    listener_id,
+                                                );
+                                            }
+                                        };
+                                    }
+                                    MessageType::Listen => {
+                                        // Happy Path
+                                        debug!("VeilidUpdate | AppMessage | Stream DIAL | received LISTEN");
+
+                                        stream
+                                            .update_inbound_last_timestamp_to_now()
+                                            .update_remote_stream_id(stream_id)
+                                            .update_status(StreamStatus::Active)
+                                            .generate_messages()
+                                            .send_messages();
+                                    }
+
+                                    MessageType::Status => {
+                                        debug!(
+                                            "VeilidUpdate | AppMessage | Stream DIAL | received STATUS | ignoring"
+                                        );
+                                    }
+                                    MessageType::Data => {
+                                        debug!("VeilidUpdate | AppMessage | Stream DIAL | received DATA | ignoring");
+                                    }
+                                }
+                            }
+                            StreamStatus::Listen => {
+                                match message_type {
+                                    MessageType::Dial => {
+                                        debug!("VeilidUpdate | AppMessage | Stream LISTEN | received DIAL");
+
+                                        stream
+                                            .update_remote_stream_id(stream_id)
+                                            .send_listen()
+                                            .await;
+                                    }
+                                    MessageType::Listen => {
+                                        warn!("VeilidUpdate | AppMessage | Stream LISTEN | received LISTEN | ignoring");
+                                    }
+
+                                    MessageType::Status => {
+                                        debug!(
+                                            "VeilidUpdate | AppMessage | Stream LISTEN | received STATUS | ignoring"
+                                        );
+                                    }
+                                    MessageType::Data => {
+                                        // Happy Path
+                                        debug!("VeilidUpdate | AppMessage | Stream LISTEN | received DATA");
+
+                                        if stream.get_remote_stream_id() == stream_id {
+                                            debug!("VeilidUpdate | AppMessage | Stream LISTEN | received DATA | matching stream_id");
+
+                                            stream
+                                                .update_status(StreamStatus::Active)
+                                                .recv_message(delivered_seq, seq, data);
+                                        }
+                                    }
+                                }
+                            }
+
+                            StreamStatus::Active => match message_type {
+                                MessageType::Dial => {
+                                    if stream.get_remote_stream_id() < stream_id {
+                                        debug!(
+                                            "VeilidUpdate | AppMessage | Stream ACTIVE | received DIAL | New stream"
+                                        );
+                                        let remote_stream_id = stream_id;
+
+                                        let stream = VeilidListener::create_stream(
+                                            &api,
+                                            remote_target,
+                                            remote_stream_id,
+                                            &streams,
+                                        );
+
+                                        stream
+                                            .update_remote_stream_id(stream_id)
+                                            .update_status(StreamStatus::Listen)
+                                            .send_listen()
+                                            .await;
+
+                                        return stream.activate(sender, remote_target, listener_id);
+                                    } else {
+                                        debug!(
+                                            "VeilidUpdate | AppMessage | Stream ACTIVE | received DIAL | ignoring"
+                                        );
+                                    }
+                                }
+                                MessageType::Listen => {
+                                    debug!(
+                                            "VeilidUpdate | AppMessage | Stream ACTIVE | received LISTEN | ignoring"
+                                        );
+                                }
+                                MessageType::Status => {
+                                    debug!("VeilidUpdate | AppMessage | Stream ACTIVE | received STATUS");
+
+                                    stream
+                                        .update_outbound_delivered_seq(delivered_seq)
+                                        .remove_sent_messages_from_queue();
+                                }
+                                MessageType::Data => {
+                                    debug!(
+                                        "VeilidUpdate | AppMessage | Stream ACTIVE | received DATA"
+                                    );
+                                    stream.recv_message(delivered_seq, seq, data);
+                                }
+                            },
+                            StreamStatus::Expired => {
+                                match message_type {
+                                    MessageType::Dial => {
+                                        warn!(
+                                            "VeilidUpdate | AppMessage | Stream EXPIRED | received DIAL"
+                                        )
+                                        // create stream
+                                        // send Sack
+                                    }
+                                    MessageType::Listen => {
+                                        warn!("VeilidUpdate | AppMessage | Stream EXPIRED | received LISTEN")
+                                        // ignore
+                                    }
+
+                                    MessageType::Status => {
+                                        warn!("VeilidUpdate | AppMessage | Stream EXPIRED | received STATUS")
+                                        // ignore
+                                    }
+                                    MessageType::Data => {
+                                        warn!("VeilidUpdate | AppMessage | Stream EXPIRED | received DATA")
+                                        // ignore
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                MessageType::Disconnect => {
-                    info!("VeilidUpdate | AppMessage | DISCONNECT");
-                    should_delete = true;
-                }
-                MessageType::Data => {
-                    debug!("VeilidUpdate | AppMessage | data packet");
-                    if let Some(stream) = streams.lock().unwrap().get(&remote_target) {
-                        if stream.is_active() {
-                            let stream = stream.clone();
-                            stream.recv_message(delivered_seq, seq, data);
-                        } else {
-                            should_disconnect = true;
-                            should_delete = true;
-                        }
-                    } else {
-                        error!("VeilidUpdate | AppMessage | Other message | stream not found");
-                        should_disconnect = true;
-                    }
-                }
-            }
-
-            if should_disconnect {
-                disconnect(api, remote_target).await;
-            }
-
-            if should_delete {
-                delete_stream(streams, remote_target);
             }
 
             return Poll::Pending;
@@ -435,19 +620,5 @@ async fn convert_update(
             debug!("VeilidUpdate | Shutdown");
             Poll::Pending
         }
-    }
-}
-
-pub async fn disconnect(api: Arc<VeilidAPI>, remote_target: Target) {
-    let data = b"DISCONNECT".to_vec();
-    let message_data = VeilidStream::encode_message(0, 0, data.into());
-    if let Ok(routing_context) = api.routing_context() {
-        let _ = routing_context
-            .with_safety(veilid_core::SafetySelection::Unsafe(
-                veilid_core::Sequencing::NoPreference,
-            ))
-            .unwrap()
-            .app_message(remote_target, message_data)
-            .await;
     }
 }

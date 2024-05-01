@@ -97,7 +97,7 @@ network.restricted_nat_retries = 3
 
 network.reverse_connection_receipt_time_ms = 5000
 
-network.routing_table.bootstrap = ["bootstrap.veilid.net", "ws://bootstrap.veilid.net:5150/ws"]
+network.routing_table.bootstrap = ["bootstrap.veilid.net"]
 network.routing_table.limit_over_attached = 64
 network.routing_table.limit_fully_attached = 32
 network.routing_table.limit_attached_strong = 16

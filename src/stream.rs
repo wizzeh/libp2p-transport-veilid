@@ -1,25 +1,36 @@
 // use prost::Message;
 
+use futures::future;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use std::task::{Context, Waker};
+use libp2p::core::transport::{ListenerId, TransportEvent};
+use std::task::{Context, Poll, Waker};
 use tokio_crate::task;
 use tokio_crate::time::{Duration, Instant};
-use veilid_core::{Target, VeilidAPI};
+use veilid_core::{CryptoKey, CryptoTyped, Target, VeilidAPI};
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 
+use crate::connection::VeilidConnection;
+use crate::listener::VeilidTransportEvent;
 use crate::stream_seq::StreamSeq;
+use crate::utils::{
+    cryptotyped_to_multiaddr, cryptotyped_to_target, get_my_node_id_from_veilid_state_config,
+    get_veilid_state_config,
+};
 use crate::SETTINGS;
 
 // This mod creates an inbound and outbound stream of data between
 // the local and remote nodes. Processes fetch a stream by its remote target
 // using VeilidStreamManager
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum StreamStatus {
+    Dial,
+    Listen,
     Active,
     Expired,
 }
@@ -37,8 +48,13 @@ pub struct VeilidStream {
     pub api: Arc<VeilidAPI>,
     // the address of the remote Veilid node
     pub remote_target: Target,
+    // my id for this stream
+    pub my_stream_id: u64,
+    // remote's id for this stream
+    pub remote_stream_id: Arc<Mutex<u64>>,
+
     // handle to wake AsyncRead for VeilidConnection
-    waker: Arc<Mutex<Option<Waker>>>,
+    pub waker: Arc<Mutex<Option<Waker>>>,
     //
     // INBOUND
     // inbound slices that are complete and readable
@@ -68,10 +84,19 @@ pub struct VeilidStream {
 }
 
 impl VeilidStream {
-    pub fn new(api: Arc<VeilidAPI>, remote_target: Target) -> Self {
+    pub fn new(api: Arc<VeilidAPI>, remote_target: Target, remote_stream_id: u64) -> Self {
+        let my_stream_id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        debug!("VeilidStream | new | my_stream_id {:?}", my_stream_id);
+
         Self {
             api,
             remote_target,
+            my_stream_id,
+            remote_stream_id: Arc::new(Mutex::new(remote_stream_id)),
 
             inbound_stream: Arc::new(Mutex::new(Vec::new())),
             inbound_buffer: Arc::new(Mutex::new(Vec::new())),
@@ -86,12 +111,24 @@ impl VeilidStream {
             outbound_last_timestamp: Arc::new(Mutex::new(Instant::now())),
 
             waker: Arc::new(Mutex::new(None)),
-            status: Arc::new(Mutex::new(StreamStatus::Active)),
+            status: Arc::new(Mutex::new(StreamStatus::Dial)),
         }
-        // VeilidStreamManager::insert_stream(stream.into());
     }
 
-    pub fn update_inbound_last_timestamp_to_now(self: Arc<VeilidStream>) -> Arc<Self> {
+    pub fn generate_random_u32() -> u32 {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        rng.gen::<u32>()
+    }
+
+    pub fn update_remote_stream_id(self: &Arc<VeilidStream>, id: u64) -> Arc<Self> {
+        debug!("VeilidStream | update_remote_stream_id {:?}", id);
+        let mut remote_stream_id = self.remote_stream_id.lock().unwrap();
+        *remote_stream_id = id;
+        self.clone()
+    }
+
+    pub fn update_inbound_last_timestamp_to_now(self: &Arc<VeilidStream>) -> Arc<Self> {
         debug!("VeilidStream | update_inbound_last_timestamp_to_now");
 
         let mut last_active = self.inbound_last_timestamp.lock().unwrap();
@@ -99,7 +136,7 @@ impl VeilidStream {
         self.clone()
     }
 
-    pub fn update_outbound_last_timestamp_to_now(self: Arc<VeilidStream>) -> Arc<Self> {
+    pub fn update_outbound_last_timestamp_to_now(self: &Arc<VeilidStream>) -> Arc<Self> {
         debug!("VeilidStream | update_outbound_last_timestamp_to_now");
 
         let mut last_active = self.outbound_last_timestamp.lock().unwrap();
@@ -107,7 +144,7 @@ impl VeilidStream {
         self.clone()
     }
 
-    pub fn update_status(self: Arc<VeilidStream>, status: StreamStatus) -> Arc<Self> {
+    pub fn update_status(self: &Arc<VeilidStream>, status: StreamStatus) -> Arc<Self> {
         debug!("VeilidStream | update_status");
 
         let mut stream_status = self.status.lock().unwrap();
@@ -116,19 +153,108 @@ impl VeilidStream {
         self.clone()
     }
 
-    pub fn is_active(&self) -> bool {
-        debug!("VeilidStream | is_active");
-        // the stream is active if we've received a message within the timeout deadline and it's not expired
+    pub fn is_pending(&self) -> bool {
+        // debug!("VeilidStream | is_pending");
 
         if let Ok(guard) = self.status.lock() {
-            if *guard == StreamStatus::Expired {
+            if *guard != StreamStatus::Active && *guard != StreamStatus::Expired {
+                debug!("VeilidStream | is_pending | StreamStatus::Pending");
+                return true;
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        // debug!("VeilidStream | is_active");
+        // the stream is active if we've received a message within the timeout deadline and it's not expired or pending
+
+        if let Ok(guard) = self.status.lock() {
+            if *guard != StreamStatus::Active {
+                debug!("VeilidStream | is_active | NOT StreamStatus::Active");
                 return false;
             }
         }
 
         let seconds = SETTINGS.stream_timeout_secs;
         let last_active = self.inbound_last_timestamp.lock().unwrap();
-        *last_active > Instant::now() - Duration::new(seconds, 0)
+        let is_active = *last_active > Instant::now() - Duration::new(seconds, 0);
+
+        let duration_since_last_active = Instant::now().duration_since(*last_active);
+        let secs_ago = duration_since_last_active.as_secs();
+
+        debug!(
+            "VeilidStream | is_active {:?} | last message {:?} secs ago",
+            is_active, secs_ago
+        );
+        is_active
+    }
+
+    pub fn is_expired(&self) -> bool {
+        // debug!("VeilidStream | is_active");
+        // the stream is active if we've received a message within the timeout deadline and it's not expired or pending
+
+        if let Ok(guard) = self.status.lock() {
+            if *guard == StreamStatus::Expired {
+                debug!("VeilidStream | is_expired | StreamStatus::Expired");
+                return false;
+            }
+        }
+
+        let seconds = SETTINGS.stream_timeout_secs;
+        let last_active = self.inbound_last_timestamp.lock().unwrap();
+        let is_active = *last_active > Instant::now() - Duration::new(seconds, 0);
+
+        let duration_since_last_active = Instant::now().duration_since(*last_active);
+        let secs_ago = duration_since_last_active.as_secs();
+
+        debug!(
+            "VeilidStream | is_expired {:?} | last message {:?} secs ago",
+            !is_active, secs_ago
+        );
+        !is_active
+    }
+
+    pub fn get_status(&self) -> Result<StreamStatus, String> {
+        if let Ok(guard) = self.status.lock() {
+            match *guard {
+                StreamStatus::Dial => return Ok(StreamStatus::Dial),
+                StreamStatus::Listen => return Ok(StreamStatus::Listen),
+                StreamStatus::Active => {
+                    let seconds = SETTINGS.stream_timeout_secs;
+                    let last_active = self.inbound_last_timestamp.lock().unwrap();
+                    let is_active = *last_active > Instant::now() - Duration::new(seconds, 0);
+
+                    let duration_since_last_active = Instant::now().duration_since(*last_active);
+                    let secs_ago = duration_since_last_active.as_secs();
+
+                    debug!(
+                        "VeilidStream | get_status {:?} | last message {:?} secs ago",
+                        is_active, secs_ago
+                    );
+
+                    if is_active {
+                        return Ok(StreamStatus::Active);
+                    } else {
+                        return Ok(StreamStatus::Expired);
+                    }
+                }
+                StreamStatus::Expired => {
+                    return Ok(StreamStatus::Expired);
+                }
+            }
+        } else {
+            error!("VeilidStream | get_status | could not get lock");
+            return Err(String::from("Could not lock status"));
+        }
+    }
+
+    pub fn get_remote_stream_id(&self) -> u64 {
+        let id = self.remote_stream_id.lock().unwrap();
+        *id
     }
 
     pub fn wake_to_read(&self) {
@@ -145,8 +271,34 @@ impl VeilidStream {
         }
     }
 
+    pub fn activate(
+        self: &Arc<VeilidStream>,
+        sender: &CryptoTyped<CryptoKey>,
+        remote_target: Target,
+        listener_id: ListenerId,
+    ) -> Poll<Option<VeilidTransportEvent<VeilidConnection>>> {
+        let api = &self.api;
+        let veilid_state_config = get_veilid_state_config(Some(api.clone())).unwrap();
+        let node_id = get_my_node_id_from_veilid_state_config(veilid_state_config).unwrap();
+        let local_addr = cryptotyped_to_multiaddr(&node_id);
+        let local_target = cryptotyped_to_target(&node_id);
+
+        let remote_addr = cryptotyped_to_multiaddr(sender);
+
+        let connection =
+            VeilidConnection::new(local_target.clone(), remote_target.clone(), self.clone())
+                .unwrap();
+
+        return Poll::Ready(Some(TransportEvent::Incoming {
+            listener_id,
+            upgrade: future::ok(connection),
+            local_addr,
+            send_back_addr: remote_addr,
+        }));
+    }
+
     // Inbound
-    pub fn decode_message(packet: &[u8]) -> Result<(u32, u32, Vec<u8>), &'static str> {
+    pub fn decode_message(packet: &[u8]) -> Result<(u32, u32, u64, Vec<u8>), &'static str> {
         debug!("VeilidStream | decode_message");
 
         if packet.len() < 4 {
@@ -157,19 +309,25 @@ impl VeilidStream {
 
         let seq = u32::from_le_bytes([packet[4], packet[5], packet[6], packet[7]]);
 
-        let data = packet[8..].to_vec();
+        let id = u64::from_le_bytes([
+            packet[8], packet[9], packet[10], packet[11], packet[12], packet[13], packet[14],
+            packet[15],
+        ]);
+
+        let data = packet[16..].to_vec();
 
         debug!(
-            "VeilidStream | decode_message | they have {:?} | {:?} bytes {:?}",
+            "VeilidStream | decode_message | they have {:?} | {:?} bytes {:?} from id {:?}",
             delivered_seq,
             seq,
-            data.len()
+            data.len(),
+            id
         );
 
-        Ok((delivered_seq, seq, data))
+        Ok((delivered_seq, seq, id, data))
     }
 
-    pub fn recv_message(self: Arc<VeilidStream>, delivered_seq: u32, seq: u32, data: Vec<u8>) {
+    pub fn recv_message(self: &Arc<VeilidStream>, delivered_seq: u32, seq: u32, data: Vec<u8>) {
         // if !self.is_active() {
         //     debug!("VeilidStream | recv_message | expired");
         //     return StreamStatus::Expired;
@@ -181,6 +339,8 @@ impl VeilidStream {
             seq,
             data.len()
         );
+
+        let mut should_update_inbound_timestamp = false;
 
         // check if we need this payload
         let inbound_received_seq = self.get_inbound_received_seq();
@@ -195,64 +355,72 @@ impl VeilidStream {
             // discard duplicates
             debug!("VeilidStream | recv_message | duplicate");
         } else if seq > inbound_received_seq + 1 {
-            // store it for later
-            debug!("VeilidStream | recv_message | store for later {:?}", seq);
+            if seq < inbound_received_seq + 20 {
+                // store it for later if it's one of the next 20 messages
+                debug!("VeilidStream | recv_message | store for later {:?}", seq);
 
-            let result = self.inbound_message_queue.lock();
-            match result {
-                Ok(mut queue) => {
-                    queue.insert(seq, data);
-                }
-                Err(e) => {
-                    error!("VeilidStream | recv_message {:?}", e);
-                    // return StreamStatus::Expired;
-                }
-            }
-        } else {
-            // receive it
-            self.recv_inbound_buffer(&data);
-
-            final_seq += 1;
-
-            debug!(
-                "VeilidStream | recv_message | received {:?} bytes {:?}",
-                seq,
-                data.len()
-            );
-
-            trace!(
-                "VeilidStream | recv_message | received {:?}",
-                String::from_utf8_lossy(&data)
-            );
-
-            // do we have the next payloads in our cache?
-            let result = self.inbound_message_queue.lock();
-
-            match result {
-                Ok(mut queue) => {
-                    // extract from queue and add to buffer
-                    while let Some(data) = queue.remove(&(final_seq + 1)) {
-                        self.recv_inbound_buffer(&data);
-                        debug!(
-                            "VeilidStream | recv_message | received another {:?}",
-                            final_seq + 1
-                        );
-
-                        final_seq += 1;
+                let result = self.inbound_message_queue.lock();
+                match result {
+                    Ok(mut queue) => {
+                        queue.insert(seq, data);
+                    }
+                    Err(e) => {
+                        error!("VeilidStream | recv_message {:?}", e);
+                        // return StreamStatus::Expired;
                     }
                 }
-                Err(e) => {
-                    error!("VeilidStream | recv_message {:?}", e);
+            } else {
+                debug!("VeilidStream | recv_message | ignore {:?}", seq);
+            }
+        } else {
+            if self.is_active() {
+                // receive it
+                self.recv_inbound_buffer(&data);
+                should_update_inbound_timestamp = true;
+                final_seq += 1;
+
+                debug!(
+                    "VeilidStream | recv_message | received {:?} bytes {:?}",
+                    seq,
+                    data.len()
+                );
+
+                trace!(
+                    "VeilidStream | recv_message | received {:?}",
+                    String::from_utf8_lossy(&data)
+                );
+
+                // do we have the next payloads in our cache?
+                let result = self.inbound_message_queue.lock();
+
+                match result {
+                    Ok(mut queue) => {
+                        // extract from queue and add to buffer
+                        while let Some(data) = queue.remove(&(final_seq + 1)) {
+                            self.recv_inbound_buffer(&data);
+                            debug!(
+                                "VeilidStream | recv_message | received another {:?}",
+                                final_seq + 1
+                            );
+
+                            final_seq += 1;
+                        }
+                    }
+                    Err(e) => {
+                        error!("VeilidStream | recv_message {:?}", e);
+                    }
                 }
+
+                // update stream
+                self.update_inbound_received_seq(final_seq)
+                    .update_outbound_delivered_seq(delivered_seq)
+                    .remove_sent_messages_from_queue()
+                    .update_inbound_stream();
             }
         };
-
-        // update stream
-        self.update_inbound_received_seq(final_seq)
-            .update_outbound_delivered_seq(delivered_seq)
-            .remove_sent_messages_from_queue()
-            .update_inbound_last_timestamp_to_now()
-            .update_inbound_stream();
+        if should_update_inbound_timestamp {
+            self.update_inbound_last_timestamp_to_now();
+        }
     }
 
     pub fn recv_inbound_buffer(&self, data: &[u8]) {
@@ -366,7 +534,7 @@ impl VeilidStream {
         self.clone()
     }
 
-    pub fn read_inbound_stream(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Option<usize> {
+    pub fn read_inbound_stream(&self, _: &mut Context<'_>, buf: &mut [u8]) -> Option<usize> {
         let mut stream = self.inbound_stream.lock().unwrap();
         trace!(
             "VeilidStream | read_inbound_stream | stream {:?}",
@@ -374,7 +542,7 @@ impl VeilidStream {
         );
         if stream.is_empty() {
             debug!("VeilidStream | read_inbound_stream | empty");
-            *self.waker.lock().unwrap() = Some(cx.waker().clone());
+            // *self.waker.lock().unwrap() = Some(cx.waker().clone());
             None
         } else {
             let readable = std::cmp::min(buf.len(), stream.len());
@@ -427,6 +595,48 @@ impl VeilidStream {
     //
     // Outbound
 
+    pub async fn send_dial(self: &Arc<VeilidStream>) {
+        let api = &self.api;
+        let remote_target = self.remote_target;
+        let my_stream_id = self.my_stream_id;
+
+        let data = b"DIAL".to_vec();
+
+        let message_data = VeilidStream::encode_message(0, 0, my_stream_id, data.into());
+
+        VeilidStream::send_message(api, remote_target, message_data).await;
+    }
+
+    pub async fn send_listen(self: &Arc<VeilidStream>) {
+        let api = &self.api;
+        let remote_target = self.remote_target;
+        let my_stream_id = self.my_stream_id;
+
+        let data = b"LISTEN".to_vec();
+
+        let message_data = VeilidStream::encode_message(0, 0, my_stream_id, data.into());
+
+        VeilidStream::send_message(api, remote_target, message_data).await;
+    }
+
+    pub async fn send_message(api: &Arc<VeilidAPI>, remote_target: Target, message_data: Vec<u8>) {
+        debug!(
+            "VeilidStream | send_message | {:?}",
+            String::from_utf8_lossy(&message_data)
+        );
+        if let Ok(routing_context) = api.routing_context() {
+            let _ = routing_context
+                .with_safety(veilid_core::SafetySelection::Unsafe(
+                    veilid_core::Sequencing::NoPreference,
+                ))
+                .unwrap()
+                .app_message(remote_target, message_data)
+                .await;
+        } else {
+            error!("VeilidStream | send_ack | could not get routing context");
+        }
+    }
+
     pub fn insert_to_outbound_stream(self: &Arc<VeilidStream>, data: &[u8]) {
         trace!("VeilidStream | insert_outbound_stream | start");
 
@@ -451,16 +661,13 @@ impl VeilidStream {
             String::from_utf8_lossy(data)
         );
 
-        // if data.starts_with(&[0, 0x1C]) {
-        //     warn!("VeilidStream | insert_outbound_stream | TERMINATION");
-        //     self.clone().update_status(StreamStatus::Expired);
-        // }
-
         // Spawn a separate thread to generate and send messages
-        let veilid_stream_clone = Arc::clone(self);
-        task::spawn(async move {
-            veilid_stream_clone.generate_messages().send_app_msg();
-        });
+        if self.is_active() {
+            let veilid_stream_clone = Arc::clone(self);
+            task::spawn(async move {
+                veilid_stream_clone.generate_messages().send_messages();
+            });
+        }
     }
 
     pub fn generate_messages(self: &Arc<Self>) -> Arc<Self> {
@@ -494,16 +701,24 @@ impl VeilidStream {
         self.clone()
     }
 
-    pub fn encode_message(received_seq: u32, msg_seq: u32, msg_data: Arc<[u8]>) -> Vec<u8> {
+    pub fn encode_message(
+        received_seq: u32,
+        msg_seq: u32,
+        stream_id: u64,
+        msg_data: Arc<[u8]>,
+    ) -> Vec<u8> {
         debug!("VeilidStream | encode_message");
 
         let mut packet = Vec::new();
 
-        // Convert sequence number to little-endian byte array and add local's received seq number
+        // Convert sequence number to little-endian byte array and append
         packet.extend_from_slice(&received_seq.to_le_bytes());
 
         // add this messages seq
         packet.extend_from_slice(&msg_seq.to_le_bytes());
+
+        // Convert stream_id to little-endian byte array and append
+        packet.extend_from_slice(&stream_id.to_le_bytes());
 
         // add the msg data slice
         packet.extend_from_slice(&msg_data);
@@ -518,8 +733,9 @@ impl VeilidStream {
         packet
     }
 
-    pub fn send_app_msg(self: &Arc<VeilidStream>) -> Arc<Self> {
-        debug!("VeilidStream | send_app_msg");
+    pub fn send_messages(self: &Arc<VeilidStream>) -> Arc<Self> {
+        debug!("VeilidStream | send_messages");
+        let my_stream_id = self.my_stream_id;
 
         let resend_interval = Duration::from_secs(SETTINGS.message_retry_timeout);
         let now = Instant::now();
@@ -550,19 +766,23 @@ impl VeilidStream {
 
         for message in messages_to_send {
             if message.data.len() > SETTINGS.veilid_network_message_limit_bytes {
-                panic!("VeilidStream | send_app_msg | data size is larger than veilid network limits {:?}", SETTINGS.veilid_network_message_limit_bytes)
+                panic!("VeilidStream | send_messages | data size is larger than veilid network limits {:?}", SETTINGS.veilid_network_message_limit_bytes)
             }
 
             // Send logic
 
             if let Ok(routing_context) = self.api.routing_context() {
                 let target = self.remote_target.clone();
-                debug!("VeilidStream | send_app_msg | target {:?}", target);
+                debug!("VeilidStream | send_messages | target {:?}", target);
 
                 let received_seq = self.get_inbound_received_seq();
 
-                let message_data =
-                    VeilidStream::encode_message(received_seq, message.seq, message.data.into());
+                let message_data = VeilidStream::encode_message(
+                    received_seq,
+                    message.seq,
+                    my_stream_id,
+                    message.data.into(),
+                );
 
                 let stream = self.clone();
 
@@ -580,11 +800,11 @@ impl VeilidStream {
                             stream.update_outbound_last_timestamp_to_now();
 
                             debug!(
-                                "VeilidStream | send_app_msg | I have {:?} | sending {:?}",
+                                "VeilidStream | send_messages | I have {:?} | sending {:?}",
                                 received_seq, message.seq,
                             )
                         }
-                        Err(e) => error!("VeilidStream | send_app_msg {:?}", e),
+                        Err(e) => error!("VeilidStream | send_messages {:?}", e),
                     }
                 });
             }
@@ -595,12 +815,13 @@ impl VeilidStream {
 
     pub fn send_status_if_stale(self: &Arc<VeilidStream>) -> Arc<Self> {
         trace!("VeilidStream | send_status_if_stale");
+        let my_stream_id = self.my_stream_id;
 
         let timeout_duration = Duration::new(SETTINGS.connection_keepalive_timeout, 0);
         let now = Instant::now();
         let last_sent = self.outbound_last_timestamp.lock().unwrap();
 
-        if now.duration_since(*last_sent) >= timeout_duration {
+        if now.duration_since(*last_sent) >= timeout_duration && self.is_active() {
             debug!("VeilidStream | send_status_if_stale | sending");
             let target = self.remote_target.clone();
 
@@ -608,7 +829,8 @@ impl VeilidStream {
             let received_seq = self.get_inbound_received_seq();
             let data = b"STATUS".to_vec();
 
-            let message_data = VeilidStream::encode_message(received_seq, sent_seq, data.into());
+            let message_data =
+                VeilidStream::encode_message(received_seq, sent_seq, my_stream_id, data.into());
 
             let veilid_stream_clone = Arc::clone(self);
 

@@ -268,9 +268,27 @@ impl<T> Transport for VeilidTransport<T> {
 
             match multiaddr_to_target(&addr) {
                 Ok(remote_target) => {
+                    // check if we already have a pending connection
+
+                    if let Some(stream) = streams.lock().unwrap().get(&remote_target) {
+                        match *stream.status.lock().unwrap() {
+                            stream::StreamStatus::Listen => {
+                                warn!(
+                                    "VeilidTransport: dial {:?} | stream listening | ignoring ",
+                                    addr
+                                );
+
+                                return Err(TransportError::Other(VeilidError::Generic(
+                                    String::from("Already connecting"),
+                                )));
+                            }
+                            _ => {}
+                        }
+                    }
+
                     return Ok(async move {
                         let stream =
-                            Arc::new(VeilidStream::new(api.clone(), remote_target.clone()));
+                            Arc::new(VeilidStream::new(api.clone(), remote_target.clone(), 0));
 
                         streams
                             .lock()
@@ -278,9 +296,9 @@ impl<T> Transport for VeilidTransport<T> {
                             .insert(remote_target, stream.clone());
 
                         let mut connection =
-                            VeilidConnection::new(api, local_target, remote_target, stream)?;
+                            VeilidConnection::new(local_target, remote_target, stream)?;
 
-                        connection.connect();
+                        connection.connect().await;
                         return Ok(connection);
                     }
                     .boxed());
@@ -365,13 +383,29 @@ fn heartbeat<T>(transport: &mut Pin<&mut VeilidTransport<T>>) {
                 stream
                     .send_status_if_stale()
                     .generate_messages()
-                    .send_app_msg();
-            } else {
+                    .send_messages();
+            } else if stream.is_expired() {
                 info!(
-                    "VeilidTransport | heartbeat | stream is inactive {:?}",
+                    "VeilidTransport | heartbeat | stream has expired {:?}",
                     stream.remote_target
                 );
                 to_delete.push(stream.remote_target);
+            } else {
+                if let Ok(status) = stream.get_status() {
+                    match status {
+                        stream::StreamStatus::Dial => {
+                            tokio_crate::spawn(async move {
+                                stream.send_dial().await;
+                            });
+                        }
+                        stream::StreamStatus::Listen => {
+                            tokio_crate::spawn(async move {
+                                stream.send_listen().await;
+                            });
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
     }

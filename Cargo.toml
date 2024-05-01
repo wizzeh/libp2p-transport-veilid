@@ -17,6 +17,7 @@ futures-timer = "3.0"
 libp2p = { version = "0.52.4" }
 lazy_static = "1.4"
 log = "0.4.11"
+rand = "0.8"
 serde_json = "1.0"
 tokio-crate = { package = "tokio", version = "1.33.0", default-features = false, features = ["net"], optional = true }
 toml = "0.5"

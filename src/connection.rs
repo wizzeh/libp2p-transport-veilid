@@ -7,7 +7,7 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use veilid_core::{Target, VeilidAPI};
+use veilid_core::Target;
 
 use crate::{errors::VeilidError, stream::VeilidStream};
 
@@ -24,7 +24,6 @@ pub struct VeilidConnection {
 
 impl VeilidConnection {
     pub fn new(
-        api: Arc<VeilidAPI>,
         local_target: Target,
         remote_target: Target,
         stream: Arc<VeilidStream>,
@@ -35,13 +34,12 @@ impl VeilidConnection {
             stream,
         };
 
-        VeilidStream::new(api, remote_target);
         Ok(connection)
     }
 
-    pub fn connect(&mut self) {
+    pub async fn connect(&mut self) {
         debug!("VeilidConnection | connect: {:?}", self);
-        self.stream.insert_to_outbound_stream(b"CONNECT");
+        self.stream.send_dial().await;
     }
 }
 
@@ -53,10 +51,13 @@ impl AsyncRead for VeilidConnection {
     ) -> Poll<io::Result<usize>> {
         debug!("AsyncRead for VeilidConnection | poll_read");
 
-        if self.stream.is_active() {
+        if !self.stream.is_expired() {
             match self.stream.read_inbound_stream(cx, buf) {
                 Some(readable) => Poll::Ready(Ok(readable)),
-                None => Poll::Pending,
+                None => {
+                    *self.stream.waker.lock().unwrap() = Some(cx.waker().clone());
+                    Poll::Pending
+                }
             }
         } else {
             Poll::Ready(Err(Error::other("Stream is inactive")))
@@ -75,7 +76,7 @@ impl AsyncWrite for VeilidConnection {
             buf.len()
         );
 
-        if self.stream.is_active() {
+        if !self.stream.is_expired() {
             let data = buf;
             let byte_count = data.len();
 

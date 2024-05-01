@@ -4,11 +4,15 @@ This is ALPHA software. Use at own risk!
 
 Enables libp2p-rust apps to communicate node-to-node over Veilid (view Veilid's [launch slides](https://veilid.com/Launch-Slides-Veilid.pdf) from Defcon 2023).
 
-This transport currently supports ONLY direct routes and not Veilid's private / safety routes.
+This transport currently supports ONLY direct routes and NOT Veilid's private / safety routes.
 
-Why use it? Offers [holepunching](https://docs.libp2p.io/concepts/nat/hole-punching/) without operating relay nodes (as this is provided by Veilid).
+Why use it? It offers [holepunching](https://docs.libp2p.io/concepts/nat/hole-punching/) without operating relay nodes (as this is provided by Veilid).
 
 ## Getting Started
+
+### Check out Tickle, the example app
+
+[Tickle](https://codeberg.org/ffffff_rabbit/tickle) is an R&D app written to demonstrate the use of libp2p-transport-veilid.
 
 ### Add the transport to your Cargo.toml
 
@@ -18,7 +22,7 @@ libp2p-transport-veilid = { path = "../packages/libp2p-transport-veilid"}
 
 ### Add the transport to your libp2p app
 
-Note: The example below no longer reflects how the Tickle app configures the transport. There is now a transport configuration with multiple transports so you can play around with TCP and Veilid. See the current Tickle main.rs file.  
+Note: The example below is not how the Tickle app configures the transport. Tickle has a transport configuration switch so you can play around with both TCP and Veilid. See the current Tickle main.rs file.  
 
 ```rust
 use libp2p_transport_veilid::VeilidTransport;
@@ -58,7 +62,7 @@ Transport settings are in `Settings` struct in `lib.rs`.
 
 ## Key Components
 
-`listener.rs` - VeilidListener receives VeilidUpdate events from the VeilidAPI. This includes incoming data from remote nodes. This struct contains the set of active streams.
+`listener.rs` - VeilidListener receives VeilidUpdate events from VeilidAPI. This includes incoming data from remote nodes. This struct contains the set of active streams.
 
 `connection.rs`- VeilidConnection represents the connection between the local node and the remote node. Veilid nodes are addressed by `Target` which are modeled in Libp2p like unix domain sockets to fit Libp2p's Multiaddr format `/unix/VLD0:ktJZt5efM1Qd8hxkRVI_NuAp2jOojv2Kkz7R6TxZcAc`. The connection struct has the active stream so that it can read and write data.
 
@@ -66,7 +70,11 @@ Transport settings are in `Settings` struct in `lib.rs`.
 
 ### More information
 
+About Veilid
+
 [Veilid](https://veilid.com/)
 [Rust docs](https://docs.rs/crate/veilid-core/latest)
+
+About Libp2p
 
 [rust-libp2p](https://github.com/libp2p/rust-libp2p/)
