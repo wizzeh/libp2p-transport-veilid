@@ -413,11 +413,20 @@ fn heartbeat<T>(transport: &mut Pin<&mut VeilidTransport<T>>) {
     if let Some(listener) = &transport.listener {
         for remote_target in to_delete {
             let mut map = listener.streams.lock().unwrap();
-            map.remove(&remote_target);
-            info!(
+
+            let stream = map.get(&remote_target);
+
+            debug!(
                 "VeilidTransport | heartbeat | deleted stream {:?}",
                 remote_target
             );
+
+            if let Some(stream) = stream {
+                let stream = stream.clone();
+                map.remove(&remote_target);
+                // wake the stream so that libp2p detects the dead stream
+                stream.wake_to_read();
+            }
         }
     }
 }

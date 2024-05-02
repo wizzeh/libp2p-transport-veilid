@@ -281,18 +281,14 @@ async fn convert_update(
                             return stream.activate(sender, remote_target, listener_id);
                         }
                         MessageType::Listen => {
-                            warn!("VeilidUpdate | AppMessage | Stream None | received LISTEN | ignoring");
-                            // should_disconnect = true;
-                            // should_delete = true;
+                            debug!("VeilidUpdate | AppMessage | Stream None | received LISTEN | ignoring");
                         }
 
                         MessageType::Status => {
-                            warn!("VeilidUpdate | AppMessage | Stream None | received STATUS");
-                            // should_disconnect = true;
+                            debug!("VeilidUpdate | AppMessage | Stream None | received STATUS | ignoring");
                         }
                         MessageType::Data => {
-                            warn!("VeilidUpdate | AppMessage | Stream None | received DATA | ignoring");
-                            // should_disconnect = true;
+                            debug!("VeilidUpdate | AppMessage | Stream None | received DATA | ignoring");
                         }
                     }
                 }
@@ -407,7 +403,7 @@ async fn convert_update(
                                             .await;
                                     }
                                     MessageType::Listen => {
-                                        warn!("VeilidUpdate | AppMessage | Stream LISTEN | received LISTEN | ignoring");
+                                        debug!("VeilidUpdate | AppMessage | Stream LISTEN | received LISTEN | ignoring");
                                     }
 
                                     MessageType::Status => {
@@ -477,30 +473,23 @@ async fn convert_update(
                                     stream.recv_message(delivered_seq, seq, data);
                                 }
                             },
-                            StreamStatus::Expired => {
-                                match message_type {
-                                    MessageType::Dial => {
-                                        warn!(
-                                            "VeilidUpdate | AppMessage | Stream EXPIRED | received DIAL"
+                            StreamStatus::Expired => match message_type {
+                                MessageType::Dial => {
+                                    debug!(
+                                            "VeilidUpdate | AppMessage | Stream EXPIRED | received DIAL | ignoring"
                                         )
-                                        // create stream
-                                        // send Sack
-                                    }
-                                    MessageType::Listen => {
-                                        warn!("VeilidUpdate | AppMessage | Stream EXPIRED | received LISTEN")
-                                        // ignore
-                                    }
-
-                                    MessageType::Status => {
-                                        warn!("VeilidUpdate | AppMessage | Stream EXPIRED | received STATUS")
-                                        // ignore
-                                    }
-                                    MessageType::Data => {
-                                        warn!("VeilidUpdate | AppMessage | Stream EXPIRED | received DATA")
-                                        // ignore
-                                    }
                                 }
-                            }
+                                MessageType::Listen => {
+                                    debug!("VeilidUpdate | AppMessage | Stream EXPIRED | received LISTEN | ignoring")
+                                }
+
+                                MessageType::Status => {
+                                    debug!("VeilidUpdate | AppMessage | Stream EXPIRED | received STATUS | ignoring")
+                                }
+                                MessageType::Data => {
+                                    debug!("VeilidUpdate | AppMessage | Stream EXPIRED | received DATA | ignoring")
+                                }
+                            },
                         }
                     }
                 }
@@ -565,7 +554,7 @@ async fn convert_update(
 
                     listen_addr.push(Protocol::Unix(my_node_id));
 
-                    warn!("NodeStatus | online");
+                    info!("NodeStatus | online");
 
                     return Poll::Ready(Some(VeilidTransportEvent::NewAddress {
                         listener_id,

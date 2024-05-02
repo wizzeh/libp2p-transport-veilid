@@ -38,7 +38,7 @@ impl VeilidConnection {
     }
 
     pub async fn connect(&mut self) {
-        debug!("VeilidConnection | connect: {:?}", self);
+        info!("VeilidConnection | connect: {:?}", self);
         self.stream.send_dial().await;
     }
 }

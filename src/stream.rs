@@ -798,11 +798,7 @@ impl VeilidStream {
                     match result {
                         Ok(_) => {
                             stream.update_outbound_last_timestamp_to_now();
-
-                            debug!(
-                                "VeilidStream | send_messages | I have {:?} | sending {:?}",
-                                received_seq, message.seq,
-                            )
+                            info!("VeilidStream | send_messages | sent {:?}", message.seq,)
                         }
                         Err(e) => error!("VeilidStream | send_messages {:?}", e),
                     }
