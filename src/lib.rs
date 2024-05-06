@@ -49,6 +49,13 @@ use crate::utils::{
     get_veilid_state_config, multiaddr_to_target, validate_multiaddr_for_veilid,
 };
 
+mod proto {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/proto/generated/payload.rs"
+    ));
+}
+
 struct Settings {
     veilid_network_message_limit_bytes: usize,
     transport_stream_packet_data_size_bytes: usize,
@@ -74,6 +81,7 @@ const SETTINGS: Settings = Settings {
 };
 
 pub struct VeilidTransport<VeilidConnection> {
+    my_keypair: Arc<Keypair>,
     update_callback: Option<UpdateCallback>, // a callback passed at api_startup to receive veilid events
     config_callback: Option<ConfigCallback>, // a callback passed at api_startup to feed config values to veilid_core
     update_receiver: Option<Receiver<VeilidUpdate>>, // a stream of VeilidUpdate events from UpdateCallback
@@ -108,8 +116,10 @@ impl VeilidTransport<VeilidConnection> {
         }
 
         // Create the config callback to read from Settings
+        let node_keys = Arc::new(node_keys);
+        let keys_clone = node_keys.clone();
         let config_callback: ConfigCallback =
-            Arc::new(move |config_key: String| lookup_config(&config_key, node_keys.clone()));
+            Arc::new(move |config_key: String| lookup_config(&config_key, keys_clone.clone()));
 
         // Create the UpdateCallback
         let (tx, rx) = channel::<VeilidUpdate>(32);
@@ -118,6 +128,7 @@ impl VeilidTransport<VeilidConnection> {
         let heartbeat_duration = Duration::from_secs(SETTINGS.heartbeat_secs).clone();
 
         Self {
+            my_keypair: node_keys,
             update_callback: Some(update_callback),
             config_callback: Some(config_callback),
             api: None,
@@ -222,8 +233,13 @@ impl<T> Transport for VeilidTransport<T> {
             );
 
             if let Some(update_receiver) = self.update_receiver.take() {
-                let listener =
-                    VeilidListener::new(id, update_receiver, self.api.clone(), self.status.clone());
+                let listener = VeilidListener::new(
+                    id,
+                    update_receiver,
+                    self.api.clone(),
+                    self.status.clone(),
+                    self.my_keypair.clone(),
+                );
                 self.listener = Some(listener);
 
                 Ok(())
@@ -273,7 +289,7 @@ impl<T> Transport for VeilidTransport<T> {
                     if let Some(stream) = streams.lock().unwrap().get(&remote_target) {
                         match *stream.status.lock().unwrap() {
                             stream::StreamStatus::Listen => {
-                                warn!(
+                                debug!(
                                     "VeilidTransport: dial {:?} | stream listening | ignoring ",
                                     addr
                                 );
@@ -285,10 +301,15 @@ impl<T> Transport for VeilidTransport<T> {
                             _ => {}
                         }
                     }
+                    let keys_clone = self.my_keypair.clone();
 
                     return Ok(async move {
-                        let stream =
-                            Arc::new(VeilidStream::new(api.clone(), remote_target.clone(), 0));
+                        let stream = Arc::new(VeilidStream::new(
+                            api.clone(),
+                            remote_target.clone(),
+                            0,
+                            keys_clone,
+                        ));
 
                         streams
                             .lock()

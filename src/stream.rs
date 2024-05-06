@@ -1,6 +1,8 @@
 // use prost::Message;
 
 use futures::future;
+use libp2p::identity::{Keypair, PublicKey};
+use prost::Message;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,6 +18,7 @@ use log::{debug, error, info, trace, warn};
 
 use crate::connection::VeilidConnection;
 use crate::listener::VeilidTransportEvent;
+use crate::proto::Payload;
 use crate::stream_seq::StreamSeq;
 use crate::utils::{
     cryptotyped_to_multiaddr, cryptotyped_to_target, get_my_node_id_from_veilid_state_config,
@@ -46,13 +49,16 @@ pub struct OutboundMessage {
 pub struct VeilidStream {
     // reference to Veilid's API
     pub api: Arc<VeilidAPI>,
+    // this node's keys
+    pub my_keypair: Arc<Keypair>,
+    // remote's public key for signature validation
+    pub remote_public_key: Arc<Mutex<Option<PublicKey>>>,
     // the address of the remote Veilid node
     pub remote_target: Target,
     // my id for this stream
     pub my_stream_id: u64,
     // remote's id for this stream
     pub remote_stream_id: Arc<Mutex<u64>>,
-
     // handle to wake AsyncRead for VeilidConnection
     pub waker: Arc<Mutex<Option<Waker>>>,
     //
@@ -84,7 +90,12 @@ pub struct VeilidStream {
 }
 
 impl VeilidStream {
-    pub fn new(api: Arc<VeilidAPI>, remote_target: Target, remote_stream_id: u64) -> Self {
+    pub fn new(
+        api: Arc<VeilidAPI>,
+        remote_target: Target,
+        remote_stream_id: u64,
+        keypair: Arc<Keypair>,
+    ) -> Self {
         let my_stream_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -97,6 +108,8 @@ impl VeilidStream {
             remote_target,
             my_stream_id,
             remote_stream_id: Arc::new(Mutex::new(remote_stream_id)),
+            my_keypair: keypair,
+            remote_public_key: Arc::new(Mutex::new(None)),
 
             inbound_stream: Arc::new(Mutex::new(Vec::new())),
             inbound_buffer: Arc::new(Mutex::new(Vec::new())),
@@ -150,6 +163,14 @@ impl VeilidStream {
         let mut stream_status = self.status.lock().unwrap();
 
         *stream_status = status;
+        self.clone()
+    }
+
+    pub fn update_remote_public_key(self: &Arc<VeilidStream>, key: PublicKey) -> Arc<Self> {
+        debug!("VeilidStream | update_remote_public_key");
+        let mut remote_public_key = self.remote_public_key.lock().unwrap();
+
+        *remote_public_key = Some(key);
         self.clone()
     }
 
@@ -298,33 +319,49 @@ impl VeilidStream {
     }
 
     // Inbound
-    pub fn decode_message(packet: &[u8]) -> Result<(u32, u32, u64, Vec<u8>), &'static str> {
+    pub fn decode_message(
+        packet: &[u8],
+        public_key: Arc<Mutex<Option<PublicKey>>>,
+    ) -> Result<(u32, u32, u64, Vec<u8>, bool), String> {
         debug!("VeilidStream | decode_message");
 
-        if packet.len() < 4 {
-            return Err("Packet too short to contain a u32 sequence number");
+        match Payload::decode(packet) {
+            Ok(payload) => {
+                trace!("VeilidStream | decode_message | payload {:?}", payload);
+
+                let Payload {
+                    received_seq,
+                    msg_seq,
+                    stream_id,
+                    signature,
+                    data,
+                } = payload;
+
+                trace!(
+                    "VeilidStream | decode_message | public key {:?}",
+                    public_key
+                );
+
+                let is_signed = match public_key.lock().unwrap().clone() {
+                    Some(key) => key.verify(&data, &signature),
+                    None => false,
+                };
+
+                info!(
+                    "VeilidStream | decode_message | they have {:?} | {:?} bytes {:?} from id {:?} | is signed {:?}",
+                    received_seq,
+                    msg_seq,
+                    data.len(),
+                    stream_id,
+                    is_signed
+                );
+                Ok((received_seq, msg_seq, stream_id, data, is_signed))
+            }
+            Err(e) => {
+                error!("VeilidStream | decode_message {:?}", e);
+                return Err(e.to_string());
+            }
         }
-
-        let delivered_seq = u32::from_le_bytes([packet[0], packet[1], packet[2], packet[3]]);
-
-        let seq = u32::from_le_bytes([packet[4], packet[5], packet[6], packet[7]]);
-
-        let id = u64::from_le_bytes([
-            packet[8], packet[9], packet[10], packet[11], packet[12], packet[13], packet[14],
-            packet[15],
-        ]);
-
-        let data = packet[16..].to_vec();
-
-        debug!(
-            "VeilidStream | decode_message | they have {:?} | {:?} bytes {:?} from id {:?}",
-            delivered_seq,
-            seq,
-            data.len(),
-            id
-        );
-
-        Ok((delivered_seq, seq, id, data))
     }
 
     pub fn recv_message(self: &Arc<VeilidStream>, delivered_seq: u32, seq: u32, data: Vec<u8>) {
@@ -600,11 +637,14 @@ impl VeilidStream {
         let remote_target = self.remote_target;
         let my_stream_id = self.my_stream_id;
 
-        let data = b"DIAL".to_vec();
+        let mut data = b"DIAL".to_vec();
+        data.extend_from_slice(&self.my_keypair.public().encode_protobuf());
 
-        let message_data = VeilidStream::encode_message(0, 0, my_stream_id, data.into());
+        let message_data =
+            VeilidStream::encode_message(0, 0, my_stream_id, data.into(), self.my_keypair.clone());
 
         VeilidStream::send_message(api, remote_target, message_data).await;
+        debug!("VeilidStream | send_dial");
     }
 
     pub async fn send_listen(self: &Arc<VeilidStream>) {
@@ -612,15 +652,18 @@ impl VeilidStream {
         let remote_target = self.remote_target;
         let my_stream_id = self.my_stream_id;
 
-        let data = b"LISTEN".to_vec();
+        let mut data = b"LISTEN".to_vec();
+        data.extend_from_slice(&self.my_keypair.public().encode_protobuf());
 
-        let message_data = VeilidStream::encode_message(0, 0, my_stream_id, data.into());
+        let message_data =
+            VeilidStream::encode_message(0, 0, my_stream_id, data.into(), self.my_keypair.clone());
 
         VeilidStream::send_message(api, remote_target, message_data).await;
+        debug!("VeilidStream | send_listen");
     }
 
     pub async fn send_message(api: &Arc<VeilidAPI>, remote_target: Target, message_data: Vec<u8>) {
-        debug!(
+        trace!(
             "VeilidStream | send_message | {:?}",
             String::from_utf8_lossy(&message_data)
         );
@@ -706,31 +749,43 @@ impl VeilidStream {
         msg_seq: u32,
         stream_id: u64,
         msg_data: Arc<[u8]>,
+        keypair: Arc<Keypair>,
     ) -> Vec<u8> {
         debug!("VeilidStream | encode_message");
 
-        let mut packet = Vec::new();
+        let mut buf = Vec::new();
+        let signature = keypair.sign(&msg_data);
 
-        // Convert sequence number to little-endian byte array and append
-        packet.extend_from_slice(&received_seq.to_le_bytes());
+        match signature {
+            Ok(signature) => {
+                let payload = Payload {
+                    received_seq,
+                    msg_seq,
+                    stream_id,
+                    signature,
+                    data: msg_data.to_vec(),
+                };
 
-        // add this messages seq
-        packet.extend_from_slice(&msg_seq.to_le_bytes());
+                trace!("VeilidStream | encode_message | payload {:?}", payload);
 
-        // Convert stream_id to little-endian byte array and append
-        packet.extend_from_slice(&stream_id.to_le_bytes());
+                match payload.encode(&mut buf) {
+                    Ok(_) => {}
+                    Err(e) => error!("VeilidStream | encode_message {:?}", e),
+                }
 
-        // add the msg data slice
-        packet.extend_from_slice(&msg_data);
+                trace!(
+                    "VeilidStream | encode_message | {:?} ",
+                    String::from_utf8_lossy(&buf)
+                );
 
-        trace!(
-            "VeilidStream | encode_message | {:?} ",
-            String::from_utf8_lossy(&packet)
-        );
+                trace!("VeilidStream | encode_message | raw {:?} ", msg_data);
+            }
+            Err(e) => {
+                error!("VeilidStream | encode_message {:?}", e)
+            }
+        }
 
-        trace!("VeilidStream | encode_message | raw {:?} ", msg_data);
-
-        packet
+        buf
     }
 
     pub fn send_messages(self: &Arc<VeilidStream>) -> Arc<Self> {
@@ -782,6 +837,7 @@ impl VeilidStream {
                     message.seq,
                     my_stream_id,
                     message.data.into(),
+                    self.my_keypair.clone(),
                 );
 
                 let stream = self.clone();
@@ -825,8 +881,13 @@ impl VeilidStream {
             let received_seq = self.get_inbound_received_seq();
             let data = b"STATUS".to_vec();
 
-            let message_data =
-                VeilidStream::encode_message(received_seq, sent_seq, my_stream_id, data.into());
+            let message_data = VeilidStream::encode_message(
+                received_seq,
+                sent_seq,
+                my_stream_id,
+                data.into(),
+                self.my_keypair.clone(),
+            );
 
             let veilid_stream_clone = Arc::clone(self);
 

@@ -3,6 +3,7 @@ use futures::{future::Ready, Stream};
 use libp2p::core::multiaddr::Protocol;
 use libp2p::core::transport::ListenerId;
 use libp2p::core::{transport::TransportEvent, Multiaddr};
+use libp2p::identity::{Keypair, PublicKey};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::str;
@@ -49,6 +50,7 @@ pub struct VeilidListener {
     node_status: Arc<RwLock<NodeStatus>>,
     status: Arc<RwLock<ListenerStatus>>,
     pub streams: Streams,
+    my_keypair: Arc<Keypair>,
 }
 
 impl VeilidListener {
@@ -57,6 +59,7 @@ impl VeilidListener {
         rx: Receiver<VeilidUpdate>,
         api: Option<Arc<VeilidAPI>>,
         node_status: Arc<RwLock<NodeStatus>>,
+        my_keypair: Arc<Keypair>,
     ) -> Self {
         let (async_tx, async_rx) = mpsc::channel(32);
 
@@ -69,6 +72,7 @@ impl VeilidListener {
             node_status,
             status: Arc::new(RwLock::new(ListenerStatus::Offline)),
             streams: Arc::new(Mutex::new(HashMap::new())),
+            my_keypair,
         }
     }
     fn create_stream(
@@ -76,13 +80,15 @@ impl VeilidListener {
         remote_target: Target,
         remote_stream_id: u64,
         streams: &Streams,
+        my_keypair: Arc<Keypair>,
     ) -> Arc<VeilidStream> {
-        // create stream
+        trace!("VeilidListener | create_stream");
 
         let stream = Arc::new(VeilidStream::new(
             api.clone(),
             remote_target.clone(),
             remote_stream_id,
+            my_keypair,
         ));
 
         if let Ok(mut guard) = streams.lock() {
@@ -124,6 +130,7 @@ impl Stream for VeilidListener {
                 let listener_status = self.status.clone();
 
                 let streams = self.streams.clone();
+                let my_keypair = self.my_keypair.clone();
 
                 tokio_crate::spawn(async move {
                     let result = convert_update(
@@ -133,12 +140,15 @@ impl Stream for VeilidListener {
                         update,
                         node_status,
                         listener_status,
+                        my_keypair,
                     )
                     .await;
+
                     async_tx
                         .send(result)
                         .await
                         .expect("Failed to send async result"); // Send back the result
+
                     waker.wake(); // Notify the original task to wake up and poll again
                 });
             }
@@ -165,6 +175,7 @@ async fn convert_update(
     update: VeilidUpdate,
     node_status: Arc<RwLock<NodeStatus>>,
     listener_status: Arc<RwLock<ListenerStatus>>,
+    my_keypair: Arc<Keypair>,
 ) -> Poll<Option<VeilidTransportEvent<VeilidConnection>>> {
     match update {
         VeilidUpdate::Log(_) => {
@@ -202,9 +213,14 @@ async fn convert_update(
                 None => 0,
             };
 
-            let (delivered_seq, seq, stream_id, data) =
-                match VeilidStream::decode_message(&app_msg.message()) {
-                    Ok((r, s, i, d)) => (r, s, i, d),
+            let remote_public_key = match option_stream {
+                Some(ref stream) => stream.remote_public_key.clone(),
+                None => Arc::new(Mutex::new(None)),
+            };
+
+            let (delivered_seq, seq, stream_id, data, is_signed) =
+                match VeilidStream::decode_message(&app_msg.message(), remote_public_key.clone()) {
+                    Ok((r, s, i, d, signed)) => (r, s, i, d, signed),
                     Err(e) => {
                         error!("VeilidUpdate | AppMessage {:?}", e);
                         return Poll::Pending;
@@ -270,7 +286,18 @@ async fn convert_update(
                                 remote_target,
                                 remote_stream_id,
                                 &streams,
+                                my_keypair,
                             );
+
+                            if &data[..4] == b"DIAL" {
+                                // Proceed to extract the key
+                                let key_bytes = &data[4..]; // Slice after the first 4 bytes
+
+                                // Decode the protobuf-encoded public key
+                                if let Ok(public_key) = PublicKey::try_decode_protobuf(key_bytes) {
+                                    stream.update_remote_public_key(public_key);
+                                }
+                            }
 
                             stream
                                 .update_remote_stream_id(stream_id)
@@ -333,6 +360,18 @@ async fn convert_update(
 
                                         let local_target = cryptotyped_to_target(&node_id);
 
+                                        if &data[..4] == b"DIAL" {
+                                            // Proceed to extract the key
+                                            let key_bytes = &data[4..]; // Slice after the first 4 bytes
+
+                                            // Decode the protobuf-encoded public key
+                                            if let Ok(public_key) =
+                                                PublicKey::try_decode_protobuf(key_bytes)
+                                            {
+                                                stream.update_remote_public_key(public_key);
+                                            }
+                                        }
+
                                         // Need to choose role based on ID
                                         match remote_target.cmp(&local_target) {
                                             std::cmp::Ordering::Less => {
@@ -346,7 +385,7 @@ async fn convert_update(
                                                     .await;
                                             }
                                             std::cmp::Ordering::Equal => {
-                                                warn!(
+                                                error!(
                                                     "VeilidUpdate | AppMessage | Stream DIAL | received DIAL | can't choose roles"
                                                 );
                                                 return Poll::Ready(None);
@@ -373,6 +412,18 @@ async fn convert_update(
                                     MessageType::Listen => {
                                         // Happy Path
                                         debug!("VeilidUpdate | AppMessage | Stream DIAL | received LISTEN");
+
+                                        if &data[..6] == b"LISTEN" {
+                                            // Proceed to extract the key
+                                            let key_bytes = &data[6..]; // Slice after the first 6 bytes
+
+                                            // Decode the protobuf-encoded public key
+                                            if let Ok(public_key) =
+                                                PublicKey::try_decode_protobuf(key_bytes)
+                                            {
+                                                stream.update_remote_public_key(public_key);
+                                            }
+                                        }
 
                                         stream
                                             .update_inbound_last_timestamp_to_now()
@@ -418,9 +469,15 @@ async fn convert_update(
                                         if stream.get_remote_stream_id() == stream_id {
                                             debug!("VeilidUpdate | AppMessage | Stream LISTEN | received DATA | matching stream_id");
 
-                                            stream
-                                                .update_status(StreamStatus::Active)
-                                                .recv_message(delivered_seq, seq, data);
+                                            if is_signed {
+                                                stream
+                                                    .update_status(StreamStatus::Active)
+                                                    .recv_message(delivered_seq, seq, data);
+                                            } else {
+                                                warn!("VeilidUpdate | AppMessage | Stream LISTEN | received DATA | not signed, discarding");
+                                            }
+                                        } else {
+                                            debug!("VeilidUpdate | AppMessage | Stream LISTEN | received DATA | NOT matching stream_id | ignoring");
                                         }
                                     }
                                 }
@@ -439,7 +496,20 @@ async fn convert_update(
                                             remote_target,
                                             remote_stream_id,
                                             &streams,
+                                            my_keypair,
                                         );
+
+                                        if &data[..4] == b"DIAL" {
+                                            // Proceed to extract the key
+                                            let key_bytes = &data[4..]; // Slice after the first 4 bytes
+
+                                            // Decode the protobuf-encoded public key
+                                            if let Ok(public_key) =
+                                                PublicKey::try_decode_protobuf(key_bytes)
+                                            {
+                                                stream.update_remote_public_key(public_key);
+                                            }
+                                        }
 
                                         stream
                                             .update_remote_stream_id(stream_id)
@@ -470,7 +540,15 @@ async fn convert_update(
                                     debug!(
                                         "VeilidUpdate | AppMessage | Stream ACTIVE | received DATA"
                                     );
-                                    stream.recv_message(delivered_seq, seq, data);
+                                    if is_signed {
+                                        stream.update_status(StreamStatus::Active).recv_message(
+                                            delivered_seq,
+                                            seq,
+                                            data,
+                                        );
+                                    } else {
+                                        warn!("VeilidUpdate | AppMessage | Stream ACTIVE | received DATA | not signed, discarding");
+                                    }
                                 }
                             },
                             StreamStatus::Expired => match message_type {

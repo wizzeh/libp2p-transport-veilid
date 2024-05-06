@@ -13,6 +13,7 @@ use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use veilid_core::FourCC;
 use veilid_core::VeilidAPIError;
@@ -180,7 +181,7 @@ const DEFAULT_SETTINGS: &str = include_str!("./settings.toml");
 
 pub fn lookup_config(
     config_key: &str,
-    node_keys: Keypair,
+    node_keys: Arc<Keypair>,
 ) -> Result<Box<dyn Any + Send>, VeilidAPIError> {
     let id = node_keys.public().to_peer_id().to_string()[44..].to_string();
 

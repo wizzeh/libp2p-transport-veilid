@@ -1,0 +1,11 @@
+syntax = "proto3";
+package payload;
+
+
+message Payload {
+    uint32 received_seq = 1;
+    uint32 msg_seq = 2;
+    uint64 stream_id = 3;
+    bytes signature = 4;
+    bytes data = 5;
+}
