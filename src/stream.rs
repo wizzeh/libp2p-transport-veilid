@@ -840,6 +840,11 @@ impl VeilidStream {
                     self.my_keypair.clone(),
                 );
 
+                debug!(
+                    "VeilidStream | send_messages | message_data len {:?}",
+                    message_data.len()
+                );
+
                 let stream = self.clone();
 
                 task::spawn(async move {
@@ -848,7 +853,7 @@ impl VeilidStream {
                             veilid_core::Sequencing::NoPreference,
                         ))
                         .unwrap()
-                        .app_message(target, message_data)
+                        .app_message(target, message_data.clone())
                         .await;
 
                     match result {
@@ -856,7 +861,13 @@ impl VeilidStream {
                             stream.update_outbound_last_timestamp_to_now();
                             info!("VeilidStream | send_messages | sent {:?}", message.seq,)
                         }
-                        Err(e) => error!("VeilidStream | send_messages {:?}", e),
+                        Err(e) => {
+                            error!("VeilidStream | send_messages {:?}", e);
+                            warn!(
+                                "VeilidStream | send_messages | message_data len {:?}",
+                                message_data.len()
+                            );
+                        }
                     }
                 });
             }
