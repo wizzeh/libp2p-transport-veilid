@@ -768,9 +768,16 @@ async fn convert_update(
             let is_signed = VeilidStream::verify_signature(remote_public_key, &data, &signature);
 
             if stream_id == 0 {
+                let target = if let Ok(guard) = local_target_mutex.lock() {
+                    guard.0.clone()
+                } else {
+                    None
+                };
+
                 info!(
-                    "VeilidUpdate | AppMessage | received self ping | from my_address {:?}",
+                    "VeilidUpdate | AppMessage | received self ping | from my_address {:?} on private route {:?} ",
                     remote_address.to_key(),
+                    target,
                 );
             } else {
                 info!(
@@ -819,8 +826,6 @@ async fn convert_update(
                         stream_id
                     );
                     stream.update_remote_stream_id(stream_id);
-                } else {
-                    stream.update_inbound_last_timestamp_to_now();
                 }
             }
 
@@ -873,6 +878,7 @@ async fn convert_update(
                                 stream
                                     .update_remote_stream_id(stream_id)
                                     .update_status(StreamStatus::Listen)
+                                    .update_inbound_last_timestamp_to_now()
                                     .send_listen()
                                     .await;
 
@@ -971,6 +977,7 @@ async fn convert_update(
                                                 stream
                                                     .update_remote_stream_id(stream_id)
                                                     .update_status(StreamStatus::Listen)
+                                                    .update_inbound_last_timestamp_to_now()
                                                     .send_listen()
                                                     .await;
 
