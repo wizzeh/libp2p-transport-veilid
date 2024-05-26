@@ -1,5 +1,4 @@
 use chrono::{DateTime, Duration, Utc};
-use futures::executor::block_on;
 use futures::future::Ready;
 
 use libp2p::core::transport::ListenerId;
@@ -93,7 +92,7 @@ impl VeilidListener {
         }
     }
 
-    fn create_stream(
+    async fn create_stream(
         api: &Arc<VeilidAPI>,
         listener_id: ListenerId,
         local_address: Address,
@@ -104,8 +103,7 @@ impl VeilidListener {
     ) -> Result<Arc<VeilidStream>, String> {
         debug!("VeilidListener | create_stream");
 
-        if let Some(remote_target) = block_on(async { remote_address.clone().to_target(api).await })
-        {
+        if let Some(remote_target) = remote_address.clone().to_target(api).await {
             info!(
                 "VeilidListener | create_stream {:?} | remote_address {:?} | remote_target {:?}",
                 remote_stream_id,
@@ -136,7 +134,6 @@ impl VeilidListener {
     }
 
     pub fn get_next_event(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Option<Event>> {
-        debug!("VeilidListener::get_next_event");
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(update)) => {
                 match update {
@@ -206,77 +203,108 @@ impl VeilidListener {
         }
     }
 
-    pub fn get_local_address(&mut self) -> Option<Address> {
+    pub async fn update_local_address(
+        api: &Arc<VeilidAPI>,
+        transport_type: VeilidTransportType,
+        local_address_mutex: Arc<Mutex<Option<Address>>>,
+        node_status: Arc<RwLock<NodeStatus>>,
+        local_target_mutex: Arc<Mutex<(Option<Target>, TargetStatus)>>,
+    ) {
         debug!("VeilidListener::get_local_address");
 
-        let api = &self.api;
-        let local_address = match self.local_address.lock() {
-            Ok(mut guard) => match *guard {
-                Some(ref address) => Some(address.clone()),
-                None => {
-                    match self.transport_type {
-                        VeilidTransportType::Safe => {
-                            debug!("VeilidListener::get_local_address | start block_on 1");
+        let local_address = match transport_type {
+            VeilidTransportType::Safe => {
+                if let Ok(mut guard) = local_address_mutex.lock() {
+                    let safe_addr = match Address::new_safe(&api).await {
+                        Ok(new_address) => {
+                            *guard = Some(new_address.clone());
 
-                            let safe_addr = block_on(async move {
-                                match Address::new_safe(&api).await {
-                                    Ok(new_address) => {
-                                        *guard = Some(new_address.clone());
-
-                                        return Some(new_address);
-                                    }
-                                    Err(_) => return None,
-                                }
-                            });
-                            debug!("VeilidListener::get_local_address | finish block_on 1");
-
-                            debug!(
-                                "VeilidListener | get_local_address | safe_addr {:?}",
-                                safe_addr
-                            );
-
-                            return safe_addr;
+                            Some(new_address)
                         }
-                        VeilidTransportType::Unsafe => {
-                            let unsafe_addr = if let Ok(guard) = self.node_status.read() {
-                                if let Some(my_node_id) = guard.my_node_id() {
-                                    Some(Address::new_unsafe(my_node_id))
-                                } else {
-                                    error!("VeilidListener | get_local_address | failed to get node_id");
-                                    None
-                                }
-                            } else {
-                                error!("VeilidListener | get_local_address | failed to read node_status ");
-                                None
-                            };
-                            debug!(
-                                "VeilidListener | get_local_address | unsafe_addr {:?}",
-                                unsafe_addr
-                            );
-
-                            return unsafe_addr;
-                        }
+                        Err(_) => None,
                     };
+                    debug!(
+                        "VeilidListener | get_local_address | safe_addr {:?}",
+                        safe_addr
+                    );
+
+                    safe_addr
+                } else {
+                    None
                 }
-            },
-            Err(_) => None,
+            }
+            VeilidTransportType::Unsafe => {
+                let unsafe_addr = if let Ok(guard) = node_status.read() {
+                    if let Some(my_node_id) = guard.my_node_id() {
+                        Some(Address::new_unsafe(my_node_id))
+                    } else {
+                        error!("VeilidListener | get_local_address | failed to get node_id");
+                        None
+                    }
+                } else {
+                    error!("VeilidListener | get_local_address | failed to read node_status ");
+                    None
+                };
+                debug!(
+                    "VeilidListener | get_local_address | unsafe_addr {:?}",
+                    unsafe_addr
+                );
+
+                unsafe_addr
+            }
         };
 
         let mut local_target = None;
-        if let Ok(guard) = self.local_target.lock() {
+        if let Ok(guard) = local_target_mutex.lock() {
             local_target = guard.0;
         }
         if local_target.is_none() && local_address.is_some() {
-            let api = &self.api;
+            let api = &api;
             let address = local_address.clone();
-            info!("VeilidListener | get_local_address | start block_on 2");
-            let target = block_on(async move { address.clone().unwrap().to_target(api).await });
-            info!("VeilidListener | get_local_address | finish block_on 2");
+            let target = address.clone().unwrap().to_target(api).await;
 
-            if let Ok(mut guard) = self.local_target.lock() {
+            if let Ok(mut guard) = local_target_mutex.lock() {
                 guard.0 = target;
                 guard.1 = TargetStatus::Active(Utc::now());
             }
+        }
+    }
+
+    pub fn get_local_address(&mut self) -> Option<Address> {
+        debug!("VeilidListener::get_local_address");
+        let mut should_update = false;
+
+        let mut local_address = None;
+
+        {
+            match self.local_address.lock() {
+                Ok(guard) => match *guard {
+                    Some(ref address) => local_address = Some(address.clone()),
+                    None => {
+                        should_update = true;
+                    }
+                },
+                Err(_) => {}
+            };
+        }
+
+        if should_update {
+            let api = self.api.clone();
+            let transport_type = self.transport_type.clone();
+            let local_address_mutex = self.local_address.clone();
+            let node_status = self.node_status.clone();
+            let local_target_mutex = self.local_target.clone();
+
+            tokio_crate::task::spawn_local(async move {
+                VeilidListener::update_local_address(
+                    &api,
+                    transport_type,
+                    local_address_mutex,
+                    node_status,
+                    local_target_mutex,
+                )
+                .await
+            });
         }
 
         debug!("VeilidListener | get_local_address {:?}", local_address);
@@ -328,7 +356,6 @@ impl VeilidListener {
 
             task::spawn(async move {
                 VeilidListener::send_message_to_me(local_target, api, message_data).await;
-                debug!("VeilidStream | send_ping | sent");
             });
         }
     }
@@ -406,7 +433,7 @@ impl VeilidListener {
                     }
 
                     if should_try_fetch {
-                        debug!("Listener::check_address_dht_record | should try fetch = true");
+                        debug!("Listener::check_address_dht_record | trying DHT fetch");
 
                         let option_my_current_private_route = {
                             if let Ok(guard) = self.local_target.lock() {
@@ -426,7 +453,7 @@ impl VeilidListener {
                                     trace!("Listener::check_address_dht_record  | open_dht_record {:?}", dht_record);
 
                                     if let Ok(option_value_data) =
-                                        routing_context.get_dht_value(key, 0, false).await
+                                        routing_context.get_dht_value(key, 0, true).await
                                     {
                                         trace!(
                                             "Listener::check_address_dht_record  | option_value_data {:?}",
@@ -438,21 +465,21 @@ impl VeilidListener {
                                                 .import_remote_private_route(blob.data().to_vec())
                                             {
                                                 info!(
-                                                    "Listener::check_address_dht_record  | found target {:?}", crypto_key
+                                                    "Listener::check_address_dht_record | found target {:?}", crypto_key
                                                 );
 
                                                 if let Some(my_current_private_route) =
                                                     option_my_current_private_route
                                                 {
                                                     match my_current_private_route {
-                                                        Target::NodeId(_) => todo!(),
+                                                        Target::NodeId(_) => {}
                                                         Target::PrivateRoute(key) => {
                                                             if key != crypto_key {
                                                                 warn!(
                                                                     "Listener::check_address_dht_record  | my target {:?} doesn't match the DHT target {:?}", key, crypto_key
                                                                 );
                                                             } else {
-                                                                debug!("Listener::check_address_dht_record  | my target matches the DHT target");
+                                                                debug!("Listener::check_address_dht_record | my target matches the DHT target");
                                                                 if let Ok(mut guard) =
                                                                     local_address_mutex.lock()
                                                                 {
@@ -476,9 +503,7 @@ impl VeilidListener {
                                                                                 );
                                                                             }
                                                                         }
-                                                                        debug!(
-                                                                            "Listener::check_address_dht_record  | success"
-                                                                        );
+                                                                        debug!("Listener::check_address_dht_record  | success");
                                                                     }
                                                                 }
                                                             }
@@ -519,7 +544,6 @@ impl VeilidListener {
                                     local_address_mutex
                                 );
                             }
-                            debug!("Listener::check_address_dht_record | end spawn");
                         });
                     }
                 }
@@ -831,7 +855,9 @@ async fn convert_update(
                                 remote_stream_id,
                                 &streams,
                                 my_keypair,
-                            ) {
+                            )
+                            .await
+                            {
                                 if &data[..4] == b"DIAL" {
                                     // Proceed to extract the key
                                     let key_bytes = &data[4..]; // Slice after the first 4 bytes
@@ -1051,7 +1077,9 @@ async fn convert_update(
                                                 remote_stream_id,
                                                 &streams,
                                                 my_keypair,
-                                            ) {
+                                            )
+                                            .await
+                                            {
                                                 if &data[..4] == b"DIAL" {
                                                     // Proceed to extract the key
                                                     let key_bytes = &data[4..]; // Slice after the first 4 bytes

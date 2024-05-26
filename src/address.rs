@@ -171,7 +171,7 @@ impl Address {
                         trace!("Address::to_target | open_dht_record {:?}", dht_record);
 
                         if let Ok(option_value_data) =
-                            routing_context.get_dht_value(*key, 0, false).await
+                            routing_context.get_dht_value(*key, 0, true).await
                         {
                             trace!(
                                 "Address::to_target | option_value_data {:?}",
