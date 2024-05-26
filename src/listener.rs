@@ -408,6 +408,14 @@ impl VeilidListener {
                     if should_try_fetch {
                         debug!("Listener::check_address_dht_record | should try fetch = true");
 
+                        let option_my_current_private_route = {
+                            if let Ok(guard) = self.local_target.lock() {
+                                guard.0
+                            } else {
+                                None
+                            }
+                        };
+
                         task::spawn(async move {
                             if let Ok(routing_context) = api.routing_context() {
                                 trace!("Listener::check_address_dht_record  got routing_context");
@@ -432,25 +440,51 @@ impl VeilidListener {
                                                 info!(
                                                     "Listener::check_address_dht_record  | found target {:?}", crypto_key
                                                 );
-                                            }
-                                        }
 
-                                        if let Ok(mut guard) = local_address_mutex.lock() {
-                                            if let Some(address) = guard.clone() {
-                                                match address {
-                                                    Address::Unsafe(_) => {}
-                                                    Address::Safe(key, keypair, ..) => {
-                                                        let new_address = Address::Safe(
-                                                            key,
-                                                            keypair,
-                                                            DHTStatus::Active(Utc::now()),
-                                                        );
-                                                        *guard = Some(new_address);
+                                                if let Some(my_current_private_route) =
+                                                    option_my_current_private_route
+                                                {
+                                                    match my_current_private_route {
+                                                        Target::NodeId(_) => todo!(),
+                                                        Target::PrivateRoute(key) => {
+                                                            if key != crypto_key {
+                                                                warn!(
+                                                                    "Listener::check_address_dht_record  | my target {:?} doesn't match the DHT target {:?}", key, crypto_key
+                                                                );
+                                                            } else {
+                                                                debug!("Listener::check_address_dht_record  | my target matches the DHT target");
+                                                                if let Ok(mut guard) =
+                                                                    local_address_mutex.lock()
+                                                                {
+                                                                    if let Some(address) =
+                                                                        guard.clone()
+                                                                    {
+                                                                        match address {
+                                                                            Address::Unsafe(_) => {}
+                                                                            Address::Safe(
+                                                                                key,
+                                                                                keypair,
+                                                                                ..,
+                                                                            ) => {
+                                                                                let new_address = Address::Safe(
+                                                                                    key,
+                                                                                    keypair,
+                                                                                    DHTStatus::Active(Utc::now()),
+                                                                                );
+                                                                                *guard = Some(
+                                                                                    new_address,
+                                                                                );
+                                                                            }
+                                                                        }
+                                                                        debug!(
+                                                                            "Listener::check_address_dht_record  | success"
+                                                                        );
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
-                                                debug!(
-                                                    "Listener::check_address_dht_record  | success"
-                                                );
                                             }
                                         }
                                     } else {
