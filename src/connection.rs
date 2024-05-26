@@ -1,4 +1,5 @@
 use futures::{AsyncRead, AsyncWrite};
+use veilid_core::Target;
 
 use std::{
     fmt,
@@ -7,9 +8,8 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use veilid_core::Target;
 
-use crate::{errors::VeilidError, stream::VeilidStream};
+use crate::{address::Address, errors::VeilidError, stream::VeilidStream};
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
@@ -17,20 +17,20 @@ use log::{debug, error, info, trace, warn};
 // Represents a connection between the local node and the remote node over the Veilid network.
 /// Connections will be direct for now.
 pub struct VeilidConnection {
-    local_target: Target,
+    local_address: Address,
     remote_target: Target,
     stream: Arc<VeilidStream>,
 }
 
 impl VeilidConnection {
     pub fn new(
-        local_target: Target,
+        local_address: Address,
         remote_target: Target,
         stream: Arc<VeilidStream>,
     ) -> Result<Self, VeilidError> {
         let connection = Self {
-            local_target,
-            remote_target: remote_target.clone(),
+            local_address,
+            remote_target,
             stream,
         };
 
@@ -109,7 +109,7 @@ impl fmt::Debug for VeilidConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VeilidConnection")
             .field("api", &"VeilidAPI".to_string())
-            .field("local_target", &self.local_target)
+            .field("local_address", &self.local_address)
             .field("remote_target", &self.remote_target)
             .finish()
     }

@@ -3,7 +3,7 @@ name = "libp2p-transport-veilid"
 edition = "2021"
 rust-version = "1.56.1"
 description = "Veilid transport protocol for libp2p"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["None"]
 license = "MIT"
 repository = "libp2p-transport-veilid"
@@ -12,6 +12,7 @@ categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 anyhow = "1.0.75"
+chrono = {version = "0.4.19", features = ["serde"] }
 futures = "0.3.8"
 futures-timer = "3.0"
 libp2p = { version = "0.52.4" }

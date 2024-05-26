@@ -4,9 +4,7 @@ This is ALPHA software. Use at own risk!
 
 Enables libp2p-rust apps to communicate node-to-node over Veilid (view Veilid's [launch slides](https://veilid.com/Launch-Slides-Veilid.pdf) from Defcon 2023).
 
-This transport currently supports ONLY direct routes and NOT Veilid's private / safety routes.
-
-Why use it? It offers [holepunching](https://docs.libp2p.io/concepts/nat/hole-punching/) without operating relay nodes (as this is provided by Veilid).
+This transport currently supports both direct routes and Veilid's private / safety routes which hides the sender and receipient's IP address from each other using [private routing](https://veilid.com/docs/private-routing/).
 
 ## Getting Started
 
@@ -33,15 +31,17 @@ use libp2p::noise::{Keypair, NoiseConfig, X25519Spec},
 let handle = Handle::current();
 let cloned_handle = handle.clone();
 
-let keys = identity::Keypair::generate_ed25519();
+let node_keys = identity::Keypair::generate_ed25519();
 
 let auth_keys = Keypair::<X25519Spec>::new()
-    .into_authentic(&keys)
+    .into_authentic(&node_keys)
     .expect("can create auth keys");
 
 use libp2p::yamux::YamuxConfig;
 
-let transp = VeilidTransport::new(Some(cloned_handle))
+// Choose from VeilidTransportType::Safe (with Veilid's private routing for IP privacy) 
+// or VeilidTransportType::Unsafe (direct connections)
+VeilidTransport::new(Some(cloned_handle), node_keys.clone(), VeilidTransportType::Safe)
     .upgrade(upgrade::Version::V1)
     .authenticate(NoiseConfig::xx(auth_keys).into_authenticated())
     .multiplex(YamuxConfig::default())
@@ -61,6 +61,8 @@ Transport settings are in `Settings` struct in `lib.rs`.
 `./.veilid/{node_id}` contains the node's keys and other Veilid data structures. These are initilized at startup if they don't exist.
 
 ## Key Components
+
+`address.rs` - Address coordinates between Libp2p's Multiaddr format and Veilid's private routes (for VeilidSafe) and node ids (for VeilidUnsafe).
 
 `listener.rs` - VeilidListener receives VeilidUpdate events from VeilidAPI. This includes incoming data from remote nodes. This struct contains the set of active streams.
 

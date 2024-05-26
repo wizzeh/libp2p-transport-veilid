@@ -7,5 +7,6 @@ message Payload {
     uint32 msg_seq = 2;
     uint64 stream_id = 3;
     bytes signature = 4;
-    bytes data = 5;
+    string address = 5;
+    bytes data = 6;
 }

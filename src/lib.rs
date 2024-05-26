@@ -1,3 +1,4 @@
+mod address;
 mod connection;
 mod errors;
 mod listener;
@@ -26,7 +27,7 @@ use libp2p::{
 
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -42,12 +43,9 @@ use wasm_timer::{Instant, Interval};
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 
+use crate::address::Address;
 use crate::settings::lookup_config;
 use crate::stream::VeilidStream;
-use crate::utils::{
-    cryptotyped_to_multiaddr, cryptotyped_to_target, get_my_node_id_from_veilid_state_config,
-    get_veilid_state_config, multiaddr_to_target, validate_multiaddr_for_veilid,
-};
 
 mod proto {
     include!(concat!(
@@ -69,26 +67,34 @@ const SETTINGS: Settings = Settings {
     // veilid's network limit
     veilid_network_message_limit_bytes: 32768,
     // our limit to account for our header bytes
-    transport_stream_packet_data_size_bytes: 32687,
+    transport_stream_packet_data_size_bytes: 32623,
     // when to retry sending an undelivered message
     message_retry_timeout: 5,
     // Send a status message, if no other message has been sent
     connection_keepalive_timeout: 5,
     // delete the stream if no message received by timeout
-    stream_timeout_secs: 15,
+    stream_timeout_secs: 20,
     // background process frequency
     heartbeat_secs: 5,
 };
 
+#[derive(Debug, Clone)]
+pub enum VeilidTransportType {
+    /// VeilidTransport with direct connections (IP address not hidden)
+    Unsafe,
+    /// VeilidTransport with safe routes (IP address hidden)
+    Safe,
+}
+
 pub struct VeilidTransport<VeilidConnection> {
-    with_ip_privacy: bool,
+    transport_type: VeilidTransportType,
     my_keypair: Arc<Keypair>,
     update_callback: Option<UpdateCallback>, // a callback passed at api_startup to receive veilid events
     config_callback: Option<ConfigCallback>, // a callback passed at api_startup to feed config values to veilid_core
     update_receiver: Option<Receiver<VeilidUpdate>>, // a stream of VeilidUpdate events from UpdateCallback
     api: Option<Arc<VeilidAPI>>, // This provides access to the main functionality of Veilid.
     runtime: Option<tokio_crate::runtime::Handle>, // handle to current runtime for thread spawning
-    listener: Option<VeilidListener>,
+    listener: Option<Arc<Mutex<VeilidListener>>>,
     events: VecDeque<
         TransportEvent<
             <VeilidTransport<VeilidConnection> as libp2p::core::Transport>::ListenerUpgrade,
@@ -100,7 +106,11 @@ pub struct VeilidTransport<VeilidConnection> {
 }
 
 impl VeilidTransport<VeilidConnection> {
-    pub fn new(handle: Option<Handle>, node_keys: Keypair, with_ip_privacy: bool) -> Self {
+    pub fn new(
+        handle: Option<Handle>,
+        node_keys: Keypair,
+        transport_type: VeilidTransportType,
+    ) -> Self {
         fn create_update_callback(tx: Sender<VeilidUpdate>) -> UpdateCallback {
             Arc::new(move |update: VeilidUpdate| {
                 trace!("update_callback | {:?}", update);
@@ -129,7 +139,7 @@ impl VeilidTransport<VeilidConnection> {
         let heartbeat_duration = Duration::from_secs(SETTINGS.heartbeat_secs).clone();
 
         Self {
-            with_ip_privacy,
+            transport_type,
             my_keypair: node_keys,
             update_callback: Some(update_callback),
             config_callback: Some(config_callback),
@@ -209,12 +219,31 @@ impl<T> Transport for VeilidTransport<T> {
 
             match api_result {
                 Ok(api) => {
-                    debug!("VeilidTransport::api_result API {:?}", api);
+                    debug!("VeilidTransport::listen_on API {:?}", api);
 
-                    self.api = Some(Arc::new(api));
+                    self.api = Some(Arc::new(api.clone()));
+
+                    let transport_type = self.transport_type.clone();
+
+                    if let Some(update_receiver) = self.update_receiver.take() {
+                        let listener = VeilidListener::new(
+                            transport_type,
+                            id,
+                            update_receiver,
+                            Arc::new(api),
+                            self.status.clone(),
+                            self.my_keypair.clone(),
+                        );
+
+                        self.listener = Some(Arc::new(Mutex::new(listener)));
+
+                        return Ok(());
+                    } else {
+                        return Err(TransportError::Other(VeilidError::CouldNotCreateListener));
+                    }
                 }
                 Err(e) => {
-                    error!("VeilidTransport::api_result Err {:?}", e);
+                    error!("VeilidTransport::listen_on Err {:?}", e);
                     return Err(TransportError::Other(errors::VeilidError::VeilidApiError(
                         e,
                     )));
@@ -222,52 +251,7 @@ impl<T> Transport for VeilidTransport<T> {
             }
         }
 
-        let api = self.api.clone();
-
-        match self.with_ip_privacy {
-            true => {
-                // get safety route blob
-                // post blob to DHT at public key
-                // return public key as listener address
-
-                // let veilid_api = get_veilid_api()?;
-                // let (route_id, blob) = veilid_api.new_private_route().await?;
-                // let route_blob = VeilidRouteBlob { route_id, blob };
-
-                todo!()
-            }
-            false => {
-                let veilid_state_config: veilid_core::VeilidStateConfig =
-                    get_veilid_state_config(api).unwrap();
-
-                if let Some(node_id) = get_my_node_id_from_veilid_state_config(veilid_state_config)
-                {
-                    let addr = cryptotyped_to_multiaddr(&node_id);
-
-                    info!(
-                        "VeilidTransport: VeilidTransport::listen_on address {}",
-                        addr.to_string()
-                    );
-
-                    if let Some(update_receiver) = self.update_receiver.take() {
-                        let listener = VeilidListener::new(
-                            id,
-                            update_receiver,
-                            self.api.clone(),
-                            self.status.clone(),
-                            self.my_keypair.clone(),
-                        );
-                        self.listener = Some(listener);
-
-                        Ok(())
-                    } else {
-                        Err(TransportError::Other(VeilidError::CouldNotCreateListener))
-                    }
-                } else {
-                    Err(TransportError::Other(VeilidError::CouldNotCreateListener))
-                }
-            }
-        }
+        Err(TransportError::Other(VeilidError::CouldNotCreateListener))
     }
 
     fn dial(
@@ -276,91 +260,106 @@ impl<T> Transport for VeilidTransport<T> {
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
         debug!("VeilidTransport: dial {:?}", addr);
 
-        match self.with_ip_privacy {
-            true => {
-                // TODO: if safe, we look up the DHT record for the address and dial the node's safety route?
+        if let Ok(remote_address) = Address::try_from(addr.clone()) {
+            debug!(
+                "VeilidTransport: dial | remote_address {:?}",
+                remote_address
+            );
 
-                // TODO: this would need to be the public key?
-                // Target can be a private route, but not sure how long that lasts
+            let api = if let Some(api) = &self.api {
+                api.clone()
+            } else {
+                return Err(TransportError::Other(VeilidError::APINotDefined));
+            };
 
-                todo!();
-            }
-            false => {
-                match validate_multiaddr_for_veilid(&addr) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("{}:{:?}", e, addr);
-                        return Err(TransportError::MultiaddrNotSupported(addr));
-                    }
-                }
-
-                let api = if let Some(api) = &self.api {
-                    api.clone()
-                } else {
-                    return Err(TransportError::Other(VeilidError::APINotDefined));
-                };
-
-                let api_clone = api.clone();
-
-                let veilid_state_config: veilid_core::VeilidStateConfig =
-                    get_veilid_state_config(Some(api_clone)).unwrap();
-                let node_id = get_my_node_id_from_veilid_state_config(veilid_state_config).unwrap();
-
-                let local_target = cryptotyped_to_target(&node_id);
-
-                if let Some(listener) = &self.listener {
+            if let Some(arc_listener) = self.listener.clone() {
+                if let Ok(mut listener) = arc_listener.lock() {
                     let streams = listener.streams.clone();
 
-                    match multiaddr_to_target(&addr) {
-                        Ok(remote_target) => {
-                            // check if we already have a pending connection
+                    let local_address = if let Some(address) = listener.get_local_address() {
+                        address
+                    } else {
+                        error!("VeilidTransport: dial | Local Address not found");
+                        return Err(TransportError::Other(VeilidError::Generic(
+                            "Local address not found".to_string(),
+                        )));
+                    };
 
-                            if let Some(stream) = streams.lock().unwrap().get(&remote_target) {
-                                match *stream.status.lock().unwrap() {
-                                    stream::StreamStatus::Listen => {
-                                        debug!(
-                                            "VeilidTransport: dial {:?} | stream listening | ignoring ",
-                                            addr
-                                        );
+                    // check if we already have a pending connection
+                    if let Some(stream) = streams.lock().unwrap().get(&remote_address) {
+                        match *stream.status.lock().unwrap() {
+                            stream::StreamStatus::Listen => {
+                                debug!(
+                                    "VeilidTransport: dial {:?} | stream listening | ignoring ",
+                                    addr
+                                );
 
-                                        return Err(TransportError::Other(VeilidError::Generic(
-                                            String::from("Already connecting"),
-                                        )));
-                                    }
-                                    _ => {}
-                                }
+                                return Err(TransportError::Other(VeilidError::Generic(
+                                    String::from("Already connecting"),
+                                )));
                             }
-                            let keys_clone = self.my_keypair.clone();
-
-                            return Ok(async move {
-                                let stream = Arc::new(VeilidStream::new(
-                                    api.clone(),
-                                    remote_target.clone(),
-                                    0,
-                                    keys_clone,
-                                ));
-
-                                streams
-                                    .lock()
-                                    .unwrap()
-                                    .insert(remote_target, stream.clone());
-
-                                let mut connection =
-                                    VeilidConnection::new(local_target, remote_target, stream)?;
-
-                                connection.connect().await;
-                                return Ok(connection);
-                            }
-                            .boxed());
+                            _ => {}
                         }
-                        Err(_) => return Err(TransportError::MultiaddrNotSupported(addr)),
                     }
+
+                    let keys_clone = self.my_keypair.clone();
+
+                    let api = api.clone();
+                    let listener_id = listener.id;
+
+                    return Ok(async move {
+                        if let Some(remote_target) = Address::to_target(&remote_address, &api).await
+                        {
+                            let stream = Arc::new(VeilidStream::new(
+                                api,
+                                listener_id,
+                                local_address.clone(),
+                                remote_address.clone(),
+                                remote_target,
+                                0,
+                                keys_clone,
+                            ));
+
+                            streams
+                                .lock()
+                                .unwrap()
+                                .insert(remote_address.clone(), stream.clone());
+
+                            let mut connection =
+                                VeilidConnection::new(local_address, remote_target, stream)?;
+
+                            connection.connect().await;
+
+                            info!(
+                                "VeilidTransport | create_stream | remote_address {:?} | remote_target {:?}",
+                                remote_address.to_key(),
+                                remote_target
+                            );
+
+                            return Ok(connection);
+                        } else {
+                            error!("VeilidTransport: dial | Remote target not found");
+                            return Err(VeilidError::Generic(
+                                "remote target not found".to_string(),
+                            ));
+                        };
+                    }
+                    .boxed());
                 } else {
                     return Err(TransportError::Other(VeilidError::Generic(
-                        "No listener on transport".to_string(),
+                        "Failed to lock listener".to_string(),
                     )));
                 }
+            } else {
+                error!("VeilidTransport: dial | Listener not found");
+
+                return Err(TransportError::Other(VeilidError::Generic(
+                    "Listener not found".to_string(),
+                )));
             }
+        } else {
+            error!("VeilidTransport: dial | Bad multiaddr");
+            return Err(TransportError::MultiaddrNotSupported(addr));
         }
     }
 
@@ -397,18 +396,20 @@ impl<T> Transport for VeilidTransport<T> {
             return Poll::Ready(event);
         }
 
-        if let Some(listener) = &mut self.listener {
-            match listener.poll_next_unpin(cx) {
-                Poll::Ready(Some(event)) => {
-                    info!("VeilidTransport | poll | listener {:?}", event);
-                    return Poll::Ready(event);
-                }
-                Poll::Ready(None) => {
-                    // The listener stream has ended
-                    // return Poll::Ready(TransportEvent::ListenerClosed { listener_id: (), reason: () });
-                }
-                Poll::Pending => {
-                    // The listener has no events available at the moment
+        if let Some(arc_listener) = self.listener.clone() {
+            if let Ok(mut listener) = arc_listener.lock() {
+                match listener.get_next_event(cx) {
+                    Poll::Ready(Some(event)) => {
+                        info!("VeilidTransport | poll | listener {:?}", event);
+                        return Poll::Ready(event);
+                    }
+                    Poll::Ready(None) => {
+                        // The listener stream has ended
+                        // return Poll::Ready(TransportEvent::ListenerClosed { listener_id: (), reason: () });
+                    }
+                    Poll::Pending => {
+                        // The listener has no events available at the moment
+                    }
                 }
             }
         }
@@ -436,57 +437,129 @@ fn heartbeat<T>(transport: &mut Pin<&mut VeilidTransport<T>>) {
     //     });
     // }
 
-    if let Some(listener) = &transport.listener {
-        let map = listener.streams.lock().unwrap();
-        let streams = map.values().cloned();
-        for stream in streams {
-            if stream.is_active() {
-                stream
-                    .send_status_if_stale()
-                    .generate_messages()
-                    .send_messages();
-            } else if stream.is_expired() {
-                info!(
-                    "VeilidTransport | heartbeat | stream has expired {:?}",
-                    stream.remote_target
-                );
-                to_delete.push(stream.remote_target);
-            } else {
-                if let Ok(status) = stream.get_status() {
-                    match status {
-                        stream::StreamStatus::Dial => {
-                            tokio_crate::spawn(async move {
-                                stream.send_dial().await;
-                            });
+    if let Some(arc_listener) = transport.listener.clone() {
+        if let Ok(listener) = arc_listener.lock() {
+            let map = listener.streams.lock().unwrap();
+            let streams = map.values().cloned();
+            for stream in streams {
+                if stream.is_active() {
+                    stream
+                        .send_status_if_stale()
+                        .generate_messages()
+                        .send_messages();
+                } else if stream.is_expired() {
+                    info!(
+                        "VeilidTransport | heartbeat | stream has expired {:?}",
+                        stream.remote_target
+                    );
+                    to_delete.push(stream.remote_address.clone());
+                } else {
+                    if let Ok(status) = stream.get_status() {
+                        match status {
+                            stream::StreamStatus::Dial => {
+                                tokio_crate::spawn(async move {
+                                    stream.send_dial().await;
+                                });
+                            }
+                            stream::StreamStatus::Listen => {
+                                tokio_crate::spawn(async move {
+                                    stream.send_listen().await;
+                                });
+                            }
+                            _ => {}
                         }
-                        stream::StreamStatus::Listen => {
-                            tokio_crate::spawn(async move {
-                                stream.send_listen().await;
-                            });
-                        }
-                        _ => {}
                     }
                 }
             }
         }
     }
 
-    if let Some(listener) = &transport.listener {
-        for remote_target in to_delete {
-            let mut map = listener.streams.lock().unwrap();
+    if let Some(arc_listener) = transport.listener.clone() {
+        if let Ok(mut listener) = arc_listener.lock() {
+            // check to see if the DHT record is recently active
+            listener.check_address_dht_record();
 
-            let stream = map.get(&remote_target);
+            // send a ping to ourselves to test our private route
+            let is_listener_attached = {
+                if let Some(node_status) = listener.get_node_status() {
+                    node_status.is_attached().clone()
+                } else {
+                    false
+                }
+            };
 
-            debug!(
-                "VeilidTransport | heartbeat | deleted stream {:?}",
-                remote_target
-            );
+            let listener_has_target = {
+                if let Ok(guard) = listener.local_target.lock() {
+                    guard.0.is_some()
+                } else {
+                    false
+                }
+            };
 
-            if let Some(stream) = stream {
-                let stream = stream.clone();
-                map.remove(&remote_target);
-                // wake the stream so that libp2p detects the dead stream
-                stream.wake_to_read();
+            match transport.transport_type {
+                VeilidTransportType::Unsafe => {}
+                VeilidTransportType::Safe => {
+                    if is_listener_attached && listener_has_target {
+                        listener.send_ping();
+                    }
+                }
+            }
+
+            for remote_address in to_delete {
+                let mut map = listener.streams.lock().unwrap();
+
+                let stream = map.get(&remote_address);
+
+                debug!(
+                    "VeilidTransport | heartbeat | deleted stream {:?}",
+                    remote_address.to_key()
+                );
+
+                if let Some(stream) = stream {
+                    let stream = stream.clone();
+                    map.remove(&remote_address);
+                    // wake the stream so that libp2p detects the dead stream
+                    stream.wake_to_read();
+                }
+            }
+
+            if let Ok(guard) = listener.local_address.lock() {
+                if let Some(ref local_address) = *guard {
+                    let local_address = local_address.clone();
+                    trace!(
+                        "VeilidTransport | heartbeat | local_address {:?}",
+                        local_address
+                    );
+                    if let Some(api) = transport.api.clone() {
+                        tokio_crate::spawn(async move {
+                            match Address::to_target(&local_address, &api).await {
+                                Some(target) => {
+                                    trace!(
+                                        "VeilidTransport | heartbeat | found my own target {:?}",
+                                        target
+                                    );
+                                }
+                                None => {
+                                    warn!(
+                                        "VeilidTransport | heartbeat | DID NOT find my own target"
+                                    );
+                                }
+                            }
+                        });
+                    }
+                } else {
+                    trace!("VeilidTransport | heartbeat | no local_address");
+                }
+            } else {
+                error!("VeilidTransport | heartbeat | could not lock addresses");
+            }
+
+            // if this node's private route target requires updating
+            if let Some(api) = transport.api.clone() {
+                if listener.should_update_target() {
+                    let api = api.clone();
+                    listener.update_target(api);
+                }
             }
         }
     }
