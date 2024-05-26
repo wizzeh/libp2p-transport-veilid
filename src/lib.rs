@@ -450,7 +450,7 @@ fn heartbeat<T>(transport: &mut Pin<&mut VeilidTransport<T>>) {
                 } else if stream.is_expired() {
                     info!(
                         "VeilidTransport | heartbeat | stream has expired {:?}",
-                        stream.remote_target
+                        stream.remote_address
                     );
                     to_delete.push(stream.remote_address.clone());
                 } else {
