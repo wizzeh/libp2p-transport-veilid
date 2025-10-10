@@ -106,9 +106,7 @@ impl VeilidListener {
         if let Some(remote_target) = remote_address.clone().to_target(api).await {
             info!(
                 "VeilidListener | create_stream {:?} | remote_address {:?} | remote_target {:?}",
-                remote_stream_id,
-                remote_address.to_key(),
-                remote_target
+                remote_stream_id, remote_address, remote_target
             );
 
             let stream = Arc::new(VeilidStream::new(
@@ -776,7 +774,7 @@ async fn convert_update(
 
                 info!(
                     "VeilidUpdate | AppMessage | received self ping | from my_address {:?} on private route {:?} ",
-                    remote_address.to_key(),
+                    remote_address,
                     target,
                 );
             } else {
@@ -788,7 +786,7 @@ async fn convert_update(
                     data.len(),
                     stream_id,
                     is_signed,
-                    remote_address.to_key(),
+                    remote_address,
                 );
             }
 

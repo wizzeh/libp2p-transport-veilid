@@ -3,3 +3,4 @@
 /target/
 /.veilid/
 .DS_Store
+/.direnv/

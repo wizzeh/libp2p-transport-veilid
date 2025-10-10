@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 mod address;
 mod connection;
 mod errors;
@@ -332,7 +333,7 @@ impl<T> Transport for VeilidTransport<T> {
 
                             info!(
                                 "VeilidTransport | create_stream | remote_address {:?} | remote_target {:?}",
-                                remote_address.to_key(),
+                                remote_address,
                                 remote_target
                             );
 
@@ -512,7 +513,7 @@ fn heartbeat<T>(transport: &mut Pin<&mut VeilidTransport<T>>) {
 
                 debug!(
                     "VeilidTransport | heartbeat | deleted stream {:?}",
-                    remote_address.to_key()
+                    remote_address
                 );
 
                 if let Some(stream) = stream {

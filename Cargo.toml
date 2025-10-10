@@ -3,7 +3,7 @@ name = "libp2p-transport-veilid"
 edition = "2021"
 rust-version = "1.56.1"
 description = "Veilid transport protocol for libp2p"
-version = "0.2.1"
+version = "0.4.0"
 authors = ["None"]
 license = "MIT"
 repository = "libp2p-transport-veilid"
@@ -24,7 +24,7 @@ rand = "0.8"
 serde_json = "1.0"
 tokio-crate = { package = "tokio", version = "1.33.0", default-features = false, features = ["net"], optional = true }
 toml = "0.5"
-veilid-core = { path = "../veilid-core" }
+veilid-core = { version = "0.4.8" }
 wasm-timer = "0.2.5"
 
 [features]
