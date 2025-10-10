@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use libp2p::Multiaddr;
 use std::sync::Arc;
-use veilid_core::{CryptoKey, CryptoTyped, DHTSchema, Encodable, FourCC, KeyPair, Sequencing, Target, VeilidAPI};
+use veilid_core::{CryptoTyped, DHTSchema, Encodable, KeyPair, NodeId, RecordKey, Sequencing, SetDHTValueOptions, Target, VeilidAPI, VALID_CRYPTO_KINDS};
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
@@ -14,13 +14,13 @@ pub enum DHTStatus {
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum Address {
-    Safe(CryptoTyped<CryptoKey>, Option<KeyPair>, DHTStatus),
-    Unsafe(CryptoTyped<CryptoKey>),
+    Safe(CryptoTyped<RecordKey>, Option<KeyPair>, DHTStatus),
+    Unsafe(CryptoTyped<NodeId>),
 }
 
 
 impl Address {
-    pub fn new_unsafe(key: &CryptoTyped<CryptoKey>) -> Address {
+    pub fn new_unsafe(key: &CryptoTyped<NodeId>) -> Address {
         Address::Unsafe(*key)
     }
 
@@ -28,7 +28,7 @@ impl Address {
         debug!("Address::new_safe");
         let api = api.clone();
 
-        match api.new_custom_private_route(&vec![FourCC(*b"VLD0")], veilid_core::Stability::LowLatency, Sequencing::NoPreference).await {
+        match api.new_custom_private_route(&VALID_CRYPTO_KINDS, veilid_core::Stability::LowLatency, Sequencing::NoPreference).await {
             Err(e) => error!("Address::new_safe | new_private_route {:?}", e),
             Ok(private_route) => {
                 let blob_data = private_route.1;
@@ -45,7 +45,7 @@ impl Address {
                         Err(e) => {
                             error!("Address::new_safe | DHTSchema::dflt(1) | {:?}", e)
                         }
-                        Ok(schema) => match routing_context.clone().with_sequencing(Sequencing::NoPreference).create_dht_record(schema, None).await {
+                        Ok(schema) => match routing_context.clone().with_sequencing(Sequencing::NoPreference).create_dht_record(schema, None, None).await {
                             Err(e) => error!("Address::new_safe | DHTSchema::dflt(1) | {:?}", e),
                             Ok(dht_record_descriptor) => {
                                 trace!(
@@ -92,7 +92,7 @@ impl Address {
 
         match address {
             Address::Safe(key, keypair, ..) => {
-                match api.new_custom_private_route(&vec![FourCC(*b"VLD0")], veilid_core::Stability::LowLatency, Sequencing::NoPreference).await {
+                match api.new_custom_private_route(&VALID_CRYPTO_KINDS, veilid_core::Stability::LowLatency, Sequencing::NoPreference).await {
                     Err(e) => error!("Address::update_safe | new_private_route {:?}", e),
                     Ok(private_route) => {
     
@@ -113,7 +113,7 @@ impl Address {
                                         trace!("Address::update_safe | open_dht_record {:?}", dht_record);
         
                                         if let Ok(result) =
-                                            routing_context.with_sequencing(Sequencing::NoPreference).set_dht_value(key, 0, blob_data.clone(), Some(owner_keys)).await
+                                            routing_context.with_sequencing(Sequencing::NoPreference).set_dht_value(key, 0, blob_data.clone(), Some(SetDHTValueOptions { writer: Some(owner_keys), allow_offline: None })).await
                                         {
                                             trace!(
                                                 "Address::update_safe | set_dht_value | key {:?}",
@@ -229,14 +229,6 @@ impl Address {
         }
     }
 
-    pub fn to_key(&self) -> CryptoKey {
-        match self {
-            Address::Unsafe(key) => return key.value.clone(),
-            Address::Safe(key, _, _) => return key.value.clone()
-        }
-
-    }
-
     pub fn cmp(&self, other: &Address) -> std::cmp::Ordering {
         let v1 = match self {
             Address::Safe(key, ..) => key.to_string(),
@@ -266,13 +258,17 @@ impl TryFrom<Multiaddr> for Address {
             return Err("Invalid format".to_string());
         }
 
-        let key =
-            CryptoKey::try_from(parts[1]).map_err(|_| "Failed to parse CryptoKey".to_string())?;
-        let typed_key = CryptoTyped::new("VLD0".as_bytes().try_into().unwrap(), key); // Consider improving error handling for "try_into"
-
         match parts[0] {
-            "/unix/s" => Ok(Address::Safe(typed_key, None, DHTStatus::None)),
-            "/unix/us" => Ok(Address::Unsafe(typed_key)),
+            "/unix/s" => {
+                let key: RecordKey = RecordKey::try_from(parts[1]).map_err(|_| "Failed to parse RecordKey".to_string())?;
+                let typed_key = CryptoTyped::new("VLD0".as_bytes().try_into().unwrap(), key);
+                Ok(Address::Safe(typed_key, None, DHTStatus::None))
+            },
+            "/unix/us" => {
+                let key: NodeId = NodeId::try_from(parts[1]).map_err(|_| "Failed to parse NodeId".to_string())?;
+                let typed_key = CryptoTyped::new("VLD0".as_bytes().try_into().unwrap(), key);
+                Ok(Address::Unsafe(typed_key))
+            },
             _ => Err("Unknown address type".to_string()),
         }
     }
@@ -288,13 +284,17 @@ impl TryFrom<String> for Address {
             return Err("Invalid format".to_string());
         }
 
-        let key =
-            CryptoKey::try_from(parts[1]).map_err(|_| "Failed to parse CryptoKey".to_string())?;
-        let typed_key = CryptoTyped::new("VLD0".as_bytes().try_into().unwrap(), key); // Improve error handling here
-
         match parts[0] {
-            "/unix/s" => Ok(Address::Safe(typed_key, None, DHTStatus::None)),
-            "/unix/us" => Ok(Address::Unsafe(typed_key)),
+            "/unix/s" => {
+                let key: RecordKey = RecordKey::try_from(parts[1]).map_err(|_| "Failed to parse RecordKey".to_string())?;
+                let typed_key = CryptoTyped::new("VLD0".as_bytes().try_into().unwrap(), key);
+                Ok(Address::Safe(typed_key, None, DHTStatus::None))
+            },
+            "/unix/us" => {
+                let key: NodeId = NodeId::try_from(parts[1]).map_err(|_| "Failed to parse NodeId".to_string())?;
+                let typed_key = CryptoTyped::new("VLD0".as_bytes().try_into().unwrap(), key);
+                Ok(Address::Unsafe(typed_key))
+            },
             _ => Err("Unknown address type".to_string()),
         }
     }

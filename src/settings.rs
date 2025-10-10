@@ -2,20 +2,19 @@ use lazy_static::lazy_static;
 use libp2p::identity::Keypair;
 use veilid_core::CryptoKind;
 use veilid_core::CryptoTyped;
+use veilid_core::CryptoTypedGroup;
 use veilid_core::KeyPair;
-use veilid_core::TypedKeyGroup;
 use veilid_core::CRYPTO_KIND_VLD0;
 
 use std::any::Any;
-use std::convert::From;
 use std::env;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
-use veilid_core::FourCC;
 use veilid_core::VeilidAPIError;
 
 use toml::Value;
@@ -246,7 +245,7 @@ pub fn lookup_config(
         match config_key {
             "network.routing_table.node_id" => match manage_keypair(id) {
                 Some(key_pair) => {
-                    let mut group = TypedKeyGroup::new();
+                    let mut group = CryptoTypedGroup::new();
 
                     group.add(veilid_core::CryptoTyped::new(
                         CRYPTO_KIND,
@@ -262,7 +261,7 @@ pub fn lookup_config(
             },
             "network.routing_table.node_id_secret" => match manage_keypair(id) {
                 Some(key_pair) => {
-                    let mut group = TypedKeyGroup::new();
+                    let mut group = CryptoTypedGroup::new();
 
                     group.add(veilid_core::CryptoTyped::new(
                         CRYPTO_KIND,
@@ -362,9 +361,8 @@ pub fn lookup_config(
             let vec = arr
                 .iter()
                 .filter_map(|val| val.as_str())
-                .filter_map(string_to_fourcc)
-                .map(FourCC::from)
-                .collect::<Vec<FourCC>>();
+                .filter_map(|s| CryptoKind::from_str(s).ok())
+                .collect::<Vec<CryptoKind>>();
             Ok(Box::new(vec))
         }
     }
@@ -381,20 +379,6 @@ fn get_value_type(key: &str) -> Result<ValueType, VeilidAPIError> {
         "get_value_type | key not found '{}'",
         key
     )))
-}
-
-fn string_to_fourcc(input: &str) -> Option<u32> {
-    if input.len() != 4 {
-        return None;
-    }
-
-    let bytes = input.as_bytes();
-    let fourcc: u32 = (bytes[0] as u32) << 24
-        | (bytes[1] as u32) << 16
-        | (bytes[2] as u32) << 8
-        | (bytes[3] as u32);
-
-    Some(fourcc)
 }
 
 pub fn manage_keypair(id: String) -> Option<CryptoTyped<KeyPair>> {

@@ -1,18 +1,12 @@
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
-use veilid_core::{CryptoKey, CryptoTyped};
+use veilid_core::{CryptoTyped, NodeId};
 
 #[derive(Debug, Default, Clone)]
 pub struct NodeStatus {
-    my_node_id: Option<CryptoTyped<CryptoKey>>,
+    my_node_id: Option<CryptoTyped<NodeId>>,
     is_attached: bool,
     public_internet_ready: bool,
-}
-
-#[derive(Debug)]
-pub enum NodeStatusError {
-    _GeneralError(String),
-    // Add other error variants here as needed
 }
 
 impl NodeStatus {
@@ -25,7 +19,7 @@ impl NodeStatus {
     }
 
     // getter for my_node_id
-    pub fn my_node_id(&self) -> &Option<CryptoTyped<CryptoKey>> {
+    pub fn my_node_id(&self) -> &Option<CryptoTyped<NodeId>> {
         &self.my_node_id
     }
 
@@ -37,7 +31,7 @@ impl NodeStatus {
         &self.public_internet_ready
     }
 
-    pub fn update_my_node_id(&mut self, node_id: &CryptoTyped<CryptoKey>) -> &mut Self {
+    pub fn update_my_node_id(&mut self, node_id: &CryptoTyped<NodeId>) -> &mut Self {
         trace!("NodeStatus::update_node_id");
         self.my_node_id = Some(node_id.to_owned());
         self
