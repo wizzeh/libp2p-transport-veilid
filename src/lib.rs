@@ -258,6 +258,7 @@ impl<T> Transport for VeilidTransport<T> {
     fn dial(
         self: &mut VeilidTransport<T>,
         addr: Multiaddr,
+        _opts: libp2p::core::transport::DialOpts,
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
         debug!("VeilidTransport: dial {:?}", addr);
 
@@ -362,23 +363,6 @@ impl<T> Transport for VeilidTransport<T> {
             error!("VeilidTransport: dial | Bad multiaddr");
             return Err(TransportError::MultiaddrNotSupported(addr));
         }
-    }
-
-    fn dial_as_listener(
-        &mut self,
-        addr: Multiaddr,
-    ) -> Result<Self::Dial, TransportError<Self::Error>> {
-        warn!("VeilidTransport: dial_as_listener {:?}", addr);
-
-        self.dial(addr)
-    }
-
-    fn address_translation(&self, listen: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
-        warn!(
-            "VeilidTransport: address_translation | listen: {:?} | observed: {:?}",
-            listen, observed
-        );
-        None
     }
 
     fn remove_listener(&mut self, id: ListenerId) -> bool {

@@ -15,7 +15,7 @@ anyhow = "1.0.75"
 chrono = {version = "0.4.19", features = ["serde"] }
 futures = "0.3.8"
 futures-timer = "3.0"
-libp2p = { version = "0.52.4" }
+libp2p = { version = "0.56.0" }
 lazy_static = "1.4"
 log = "0.4.11"
 prost = "0.10"
